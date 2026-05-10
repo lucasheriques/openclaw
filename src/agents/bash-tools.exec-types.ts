@@ -18,6 +18,9 @@ export type ExecToolDefaults = {
   safeBinTrustedDirs?: string[];
   safeBinProfiles?: Record<string, SafeBinProfileFixture>;
   agentId?: string;
+  agentRunId?: string;
+  turnId?: string;
+  correlationId?: string;
   backgroundMs?: number;
   timeoutSec?: number;
   approvalWarningText?: string;
@@ -38,6 +41,7 @@ export type ExecToolDefaults = {
    *  so the cron-run remap can route global-scope agents to the "global"
    *  queue instead of agent-main. */
   sessionScope?: "per-sender" | "global";
+  sessionId?: string;
   messageProvider?: string;
   currentChannelId?: string;
   currentThreadTs?: string;
@@ -45,6 +49,12 @@ export type ExecToolDefaults = {
   notifyOnExit?: boolean;
   notifyOnExitEmptySuccess?: boolean;
   cwd?: string;
+  // Derived from channel transport metadata (not user input). Injected as
+  // OPENCLAW_CALLER_* env vars so subprocess CLIs can enforce per-caller
+  // scoping without trusting model-supplied flags.
+  callerPhone?: string;
+  callerJid?: string;
+  callerChannel?: string;
 };
 
 export type ExecApprovalFollowupOutcome = {

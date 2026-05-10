@@ -184,6 +184,32 @@ describe("exec PATH login shell merge", () => {
     expect(value).toBe("exec");
   });
 
+  it("prepends the GRINGO_NGR_BIN directory to PATH for host=gateway commands", async () => {
+    if (isWin) {
+      return;
+    }
+    process.env.PATH = "/usr/bin";
+    process.env.GRINGO_NGR_BIN = "/Users/lunanova/go/bin/ngr";
+
+    try {
+      const tool = createExecTool({ host: "gateway", security: "full", ask: "off" });
+      const result = await tool.execute("call-gringo-ngr-path", {
+        command: "echo $PATH",
+        yieldMs: FOREGROUND_TEST_YIELD_MS,
+      });
+      const entries = normalizePathEntries(result.content.find((c) => c.type === "text")?.text);
+
+      expect(entries.slice(0, 4)).toEqual([
+        "/Users/lunanova/go/bin",
+        "/custom/bin",
+        "/opt/bin",
+        "/usr/bin",
+      ]);
+    } finally {
+      delete process.env.GRINGO_NGR_BIN;
+    }
+  });
+
   it("throws security violation when env.PATH is provided", async () => {
     if (isWin) {
       return;

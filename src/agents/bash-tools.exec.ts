@@ -1521,6 +1521,42 @@ export function createExecTool(
         applyPathPrepend(env, defaultPathPrepend);
       }
 
+      // Per-spawn mutation of the local `env` — never touches process.env,
+      // so concurrent agent turns stay isolated.
+      if (defaults?.agentId) env.OPENCLAW_AGENT_ID = defaults.agentId;
+      if (defaults?.agentRunId) env.OPENCLAW_AGENT_RUN_ID = defaults.agentRunId;
+      if (defaults?.turnId) env.OPENCLAW_TURN_ID = defaults.turnId;
+      if (defaults?.correlationId) env.OPENCLAW_CORRELATION_ID = defaults.correlationId;
+      if (defaults?.callerPhone) env.OPENCLAW_CALLER_PHONE = defaults.callerPhone;
+      if (defaults?.callerJid) env.OPENCLAW_CALLER_JID = defaults.callerJid;
+      if (defaults?.callerChannel) env.OPENCLAW_CALLER_CHANNEL = defaults.callerChannel;
+      if (!sandbox && host === "gateway") {
+        const ngrBin = env.GRINGO_NGR_BIN?.trim() || env.NGR_BIN?.trim();
+        if (ngrBin && path.isAbsolute(ngrBin)) {
+          applyPathPrepend(env, [path.dirname(ngrBin)]);
+        }
+      }
+      // Session identifiers for subprocess telemetry: sessionKey is stable
+      // across /new and /reset, sessionId is the JSONL filename under
+      // ~/.openclaw/agents/<agentId>/sessions/ so tools can cross-link
+      // their logs back to the originating conversation turn.
+      if (defaults?.sessionKey) env.OPENCLAW_SESSION_KEY = defaults.sessionKey;
+      if (defaults?.sessionId) env.OPENCLAW_SESSION_ID = defaults.sessionId;
+
+      // Redact phone to last-4 so the audit log stays low-PII; full identity
+      // only flows to the subprocess env.
+      if (defaults?.callerPhone || defaults?.callerJid) {
+        const maskedPhone = defaults.callerPhone
+          ? `***${defaults.callerPhone.slice(-4)}`
+          : "(none)";
+        const channel = defaults?.callerChannel ?? "(unknown)";
+        logInfo(`exec: caller identity attached (channel=${channel} phone=${maskedPhone})`);
+      } else if (defaults?.sessionKey) {
+        // sessionKey implies agent turn (not cron); log so downstream
+        // fail-closed behavior is visible in the gateway stream.
+        logInfo(`exec: no caller identity available for agent turn`);
+      }
+
       if (host === "node") {
         return executeNodeHostCommand({
           command: params.command,

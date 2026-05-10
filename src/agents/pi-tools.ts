@@ -746,10 +746,20 @@ export function createOpenClawCodingTools(options?: {
         sessionKey: options?.sessionKey,
         mainKey: options?.config?.session?.mainKey,
         sessionScope: options?.config?.session?.scope,
+        sessionId: options?.sessionId,
         messageProvider: options?.messageProvider,
         currentChannelId: options?.currentChannelId,
         currentThreadTs: options?.currentThreadTs,
         accountId: options?.agentAccountId,
+        agentRunId: options?.runId,
+        turnId: options?.currentMessageId == null ? undefined : String(options.currentMessageId),
+        correlationId:
+          options?.currentMessageId == null ? undefined : String(options.currentMessageId),
+        // Channel transport metadata threads through createLazyExecTool into
+        // the ExecToolDefaults closure -> env vars on every spawned subprocess.
+        callerPhone: options?.senderE164 == null ? undefined : options.senderE164,
+        callerJid: options?.senderId == null ? undefined : options.senderId,
+        callerChannel: options?.messageProvider,
         backgroundMs: options?.exec?.backgroundMs ?? execConfig.backgroundMs,
         timeoutSec: options?.exec?.timeoutSec ?? execConfig.timeoutSec,
         approvalRunningNoticeMs:
