@@ -9,8 +9,10 @@ import {
   type ChannelOutboundAdapter,
 } from "openclaw/plugin-sdk/channel-send-result";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { redactIdentifier } from "openclaw/plugin-sdk/logging-core";
 import { resolveOutboundSendDep } from "openclaw/plugin-sdk/outbound-send-deps";
 import { sendTextMediaPayload } from "openclaw/plugin-sdk/reply-payload";
+import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import {
   normalizeWhatsAppOutboundPayload,
   normalizeWhatsAppPayloadText,
@@ -18,6 +20,8 @@ import {
 import { WHATSAPP_LEGACY_OUTBOUND_SEND_DEP_KEYS } from "./outbound-send-deps.js";
 import { lookupInboundMessageMetaForTarget } from "./quoted-message.js";
 import { toWhatsappJid } from "./text-runtime.js";
+
+const outboundQuoteLog = createSubsystemLogger("gateway/channels/whatsapp").child("outbound");
 
 type WhatsAppChunker = NonNullable<ChannelOutboundAdapter["chunker"]>;
 type WhatsAppSendTextOptions = {
@@ -34,6 +38,9 @@ type WhatsAppSendTextOptions = {
   audioAsVoice?: boolean;
   forceDocument?: boolean;
   accountId?: string;
+  replyToId?: string | null;
+  requesterSenderId?: string | null;
+  requesterSenderE164?: string | null;
   quotedMessageKey?: {
     id: string;
     remoteJid: string;
@@ -83,6 +90,10 @@ function resolveQuoteLookupAccountId(cfg?: OpenClawConfig, accountId?: string | 
   });
 }
 
+function redactOptionalIdentifier(value: string | undefined): string {
+  return value ? redactIdentifier(value) : "none";
+}
+
 type WhatsAppOutboundBaseCore = Pick<
   ChannelOutboundAdapter,
   | "deliveryMode"
@@ -125,6 +136,8 @@ export function createWhatsAppOutboundBase({
     accountId: string;
     to: string;
     replyToId?: string | null;
+    requesterSenderId?: string | null;
+    requesterSenderE164?: string | null;
   }) => {
     const replyToId = params.replyToId?.trim();
     if (!replyToId) {
@@ -132,11 +145,41 @@ export function createWhatsAppOutboundBase({
     }
     const targetJid = toWhatsappJid(params.to);
     const cachedMeta = lookupInboundMessageMetaForTarget(params.accountId, targetJid, replyToId);
+    const requesterSender = params.requesterSenderId ?? params.requesterSenderE164;
+    const requesterParticipant =
+      targetJid.endsWith("@g.us") && requesterSender ? toWhatsappJid(requesterSender) : undefined;
+    const participant = cachedMeta?.fromMe
+      ? cachedMeta?.participant
+      : (requesterParticipant ?? cachedMeta?.participant);
+    const participantSource = cachedMeta?.fromMe
+      ? cachedMeta?.participant
+        ? "cache-from-me"
+        : "none"
+      : requesterParticipant
+        ? "requester"
+        : cachedMeta?.participant
+          ? "cache"
+          : "none";
+    outboundQuoteLog.info(
+      [
+        `Quote resolve -> message ${replyToId}`,
+        `target ${redactIdentifier(targetJid)}`,
+        `remote ${redactIdentifier(cachedMeta?.remoteJid ?? targetJid)}`,
+        `group=${targetJid.endsWith("@g.us")}`,
+        `cache=${cachedMeta ? "hit" : "miss"}`,
+        `fromMe=${cachedMeta?.fromMe ?? false}`,
+        `participant=${redactOptionalIdentifier(participant)}`,
+        `participantSource=${participantSource}`,
+        `cachedParticipant=${redactOptionalIdentifier(cachedMeta?.participant)}`,
+        `requesterParticipant=${redactOptionalIdentifier(requesterParticipant)}`,
+        `hasBody=${Boolean(cachedMeta?.body)}`,
+      ].join(" "),
+    );
     return {
       id: replyToId,
       remoteJid: cachedMeta?.remoteJid ?? targetJid,
       fromMe: cachedMeta?.fromMe ?? false,
-      participant: cachedMeta?.participant,
+      participant,
       messageText: cachedMeta?.body,
     };
   };
@@ -158,7 +201,17 @@ export function createWhatsAppOutboundBase({
     resolveTarget,
     ...createAttachedChannelResultAdapter({
       channel: "whatsapp",
-      sendText: async ({ cfg, to, text, accountId, deps, gifPlayback, replyToId }) => {
+      sendText: async ({
+        cfg,
+        to,
+        text,
+        accountId,
+        requesterSenderId,
+        requesterSenderE164,
+        deps,
+        gifPlayback,
+        replyToId,
+      }) => {
         const normalizedText = normalizeText(text);
         if (skipEmptyText && !normalizedText) {
           return { messageId: "" };
@@ -172,11 +225,16 @@ export function createWhatsAppOutboundBase({
           accountId: lookupAccountId,
           to,
           replyToId,
+          requesterSenderId,
+          requesterSenderE164,
         });
         return await send(to, normalizedText, {
           verbose: false,
           cfg,
           accountId: accountId ?? undefined,
+          replyToId,
+          requesterSenderId,
+          requesterSenderE164,
           gifPlayback,
           quotedMessageKey,
         });
@@ -191,6 +249,8 @@ export function createWhatsAppOutboundBase({
         mediaReadFile,
         audioAsVoice,
         accountId,
+        requesterSenderId,
+        requesterSenderE164,
         deps,
         gifPlayback,
         forceDocument,
@@ -205,6 +265,8 @@ export function createWhatsAppOutboundBase({
           accountId: lookupAccountId,
           to,
           replyToId,
+          requesterSenderId,
+          requesterSenderE164,
         });
         return await send(to, normalizeText(text), {
           verbose: false,
@@ -215,6 +277,9 @@ export function createWhatsAppOutboundBase({
           mediaReadFile,
           ...(audioAsVoice === undefined ? {} : { audioAsVoice }),
           accountId: accountId ?? undefined,
+          replyToId,
+          requesterSenderId,
+          requesterSenderE164,
           gifPlayback,
           forceDocument,
           quotedMessageKey,

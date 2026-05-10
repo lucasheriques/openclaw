@@ -173,16 +173,6 @@ describe("web auto-reply", () => {
             .jpeg({ quality: 100, chromaSubsampling: "4:4:4" })
             .toBuffer(),
       },
-      {
-        name: "webp",
-        mime: "image/webp",
-        make: (buf: Buffer, opts: { width: number; height: number }) =>
-          sharp(buf, {
-            raw: { width: opts.width, height: opts.height, channels: 3 },
-          })
-            .webp({ quality: 100 })
-            .toBuffer(),
-      },
     ] as const;
 
     const width = 320;
@@ -237,6 +227,47 @@ describe("web auto-reply", () => {
         }
         expect(sendMedia).toHaveBeenCalledTimes(renderedFormats.length);
         expect(reply).not.toHaveBeenCalled();
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+  });
+
+  it("preserves webp media as a sticker instead of compressing to jpeg", async () => {
+    const width = 320;
+    const height = 320;
+    const webp = await sharp(crypto.randomBytes(width * height * 3), {
+      raw: { width, height, channels: 3 },
+    })
+      .webp({ quality: 100 })
+      .toBuffer();
+    expect(webp.length).toBeGreaterThan(0);
+
+    await withMediaCap(1, async () => {
+      const sendMedia = vi.fn();
+      const { reply, dispatch } = await setupSingleInboundMessage({
+        resolverValue: {
+          text: "hi",
+          mediaUrl: "https://example.com/generated-image",
+        },
+        sendMedia,
+      });
+      const fetchMock = mockFetchMediaBuffer(webp, "image/webp");
+
+      try {
+        await dispatch("msg-webp-sticker");
+        expect(sendMedia).toHaveBeenCalledTimes(1);
+        const payload = sendMedia.mock.calls[0]?.[0] as {
+          sticker?: Buffer;
+          image?: Buffer;
+          caption?: string;
+          mimetype?: string;
+        };
+        expect(payload.sticker).toEqual(webp);
+        expect(payload.image).toBeUndefined();
+        expect(payload.caption).toBeUndefined();
+        expect(payload.mimetype).toBeUndefined();
+        expect(reply).toHaveBeenCalledWith("hi", undefined);
       } finally {
         fetchMock.mockRestore();
       }

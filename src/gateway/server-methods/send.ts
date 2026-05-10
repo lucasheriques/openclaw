@@ -414,6 +414,8 @@ export const sendHandlers: GatewayRequestHandlers = {
       gifPlayback?: boolean;
       channel?: string;
       accountId?: string;
+      requesterSenderId?: string;
+      requesterSenderE164?: string;
       agentId?: string;
       replyToId?: string;
       threadId?: string;
@@ -456,6 +458,8 @@ export const sendHandlers: GatewayRequestHandlers = {
       return;
     }
     const accountId = normalizeOptionalString(request.accountId);
+    const requesterSenderId = normalizeOptionalString(request.requesterSenderId);
+    const requesterSenderE164 = normalizeOptionalString(request.requesterSenderE164);
     const replyToId = normalizeOptionalString(request.replyToId);
     const threadId = normalizeOptionalString(request.threadId);
 
@@ -574,6 +578,8 @@ export const sendHandlers: GatewayRequestHandlers = {
           channel: outboundChannel,
           to: deliveryTarget,
           accountId,
+          requesterSenderId: requesterSenderId ?? null,
+          requesterSenderE164: requesterSenderE164 ?? null,
           payloads: outboundPayloads,
           replyToId: replyToId ?? null,
           session: outboundSession,

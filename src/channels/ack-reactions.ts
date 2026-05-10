@@ -80,7 +80,6 @@ export function shouldAckReactionForWhatsApp(params: {
     requireMention: true,
     canDetectMention: true,
     effectiveWasMentioned: params.wasMentioned,
-    shouldBypassMention: params.groupActivated,
   });
 }
 

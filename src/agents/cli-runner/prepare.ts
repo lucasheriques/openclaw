@@ -230,6 +230,11 @@ export async function prepareCliRunContext(
           OPENCLAW_MCP_SESSION_KEY: params.sessionKey ?? "",
           OPENCLAW_MCP_MESSAGE_CHANNEL: params.messageChannel ?? params.messageProvider ?? "",
           OPENCLAW_MCP_INBOUND_EVENT_KIND: params.currentInboundEventKind ?? "",
+          OPENCLAW_MCP_CURRENT_CHANNEL_ID: params.currentChannelId ?? "",
+          OPENCLAW_MCP_CURRENT_THREAD_TS: params.currentThreadTs ?? "",
+          OPENCLAW_MCP_CURRENT_MESSAGE_ID:
+            params.currentMessageId == null ? "" : String(params.currentMessageId),
+          OPENCLAW_MCP_REPLY_TO_MODE: params.replyToMode ?? "",
         }
       : undefined,
     warn: (message) => cliBackendLog.warn(message),

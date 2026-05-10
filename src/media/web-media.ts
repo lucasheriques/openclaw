@@ -471,9 +471,12 @@ async function loadWebMediaInternal(
     const cap = maxBytes !== undefined ? maxBytes : maxBytesForKind(params.kind ?? "document");
     if (params.kind === "image") {
       const isGif = params.contentType === "image/gif";
-      if (isGif || !optimizeImages) {
+      const isWebp = params.contentType === "image/webp";
+      if (isGif || isWebp || !optimizeImages) {
         if (params.buffer.length > cap) {
-          throw new Error(formatCapLimit(isGif ? "GIF" : "Media", cap, params.buffer.length));
+          throw new Error(
+            formatCapLimit(isGif ? "GIF" : isWebp ? "WebP" : "Media", cap, params.buffer.length),
+          );
         }
         return {
           buffer: params.buffer,

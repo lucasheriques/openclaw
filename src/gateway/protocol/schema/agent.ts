@@ -111,6 +111,10 @@ export const SendParamsSchema = Type.Object(
     gifPlayback: Type.Optional(Type.Boolean()),
     channel: Type.Optional(Type.String()),
     accountId: Type.Optional(Type.String()),
+    /** Originating sender id used by channel adapters for native quote metadata. */
+    requesterSenderId: Type.Optional(Type.String()),
+    /** Originating sender E.164 phone used by channel adapters for native quote metadata. */
+    requesterSenderE164: Type.Optional(Type.String()),
     /** Optional agent id for per-agent media root resolution on gateway sends. */
     agentId: Type.Optional(Type.String()),
     /** Reply target message id for native quoted/threaded sends where supported. */

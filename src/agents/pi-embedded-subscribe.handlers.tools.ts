@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import {
   HEARTBEAT_RESPONSE_TOOL_NAME,
@@ -66,6 +68,9 @@ const beforeToolCallModuleLoader = createLazyImportLoader<BeforeToolCallModule>(
 );
 const LIVE_EXEC_OUTPUT_MAX_CHARS = 8000;
 const LIVE_EXEC_UPDATE_MIN_INTERVAL_MS = 250;
+
+const execFileAsync = promisify(execFile);
+const GRINGO_STICKER_PATH_SEGMENT = "/gringo-stickers/";
 
 function loadExecApprovalReply(): Promise<ExecApprovalReplyModule> {
   return execApprovalReplyModuleLoader.load();
@@ -428,6 +433,64 @@ function queuePendingToolMedia(
   if (mediaReply.trustedLocalMedia) {
     ctx.state.pendingToolTrustedLocalMedia = true;
   }
+}
+
+function clearPendingToolMediaSentByMessagingTool(ctx: ToolHandlerContext, mediaUrls: string[]) {
+  if (mediaUrls.length === 0 || ctx.state.pendingToolMediaUrls.length === 0) {
+    return;
+  }
+  // The message tool is an explicit delivery path. Clear the generated-media
+  // fallback queue even when the sent file is a derivative of the generated
+  // media, e.g. JPG -> WebP sticker.
+  ctx.state.pendingToolMediaUrls = [];
+  ctx.state.pendingToolAudioAsVoice = false;
+  ctx.state.pendingToolTrustedLocalMedia = false;
+}
+
+function normalizeGringoStickerPath(mediaUrl: string): string | undefined {
+  const trimmed = mediaUrl.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  let localPath = trimmed;
+  if (trimmed.startsWith("file://")) {
+    try {
+      localPath = new URL(trimmed).pathname;
+    } catch {
+      return undefined;
+    }
+  }
+  if (!localPath.includes(GRINGO_STICKER_PATH_SEGMENT) || !localPath.endsWith(".webp")) {
+    return undefined;
+  }
+  return localPath;
+}
+
+async function markGringoStickerSentAfterMessagingTool(
+  ctx: ToolHandlerContext,
+  mediaUrls: string[],
+): Promise<void> {
+  const stickerPaths = Array.from(
+    new Set(mediaUrls.map(normalizeGringoStickerPath).filter((path): path is string => Boolean(path))),
+  );
+  if (stickerPaths.length === 0) {
+    return;
+  }
+  const ngrBin = process.env.GRINGO_NGR_BIN?.trim() || process.env.NGR_BIN?.trim();
+  if (!ngrBin) {
+    ctx.log.warn("Skipping Gringo sticker mark-sent: set GRINGO_NGR_BIN or NGR_BIN");
+    return;
+  }
+  await Promise.all(
+    stickerPaths.map(async (path) => {
+      try {
+        await execFileAsync(ngrBin, ["stickers", "mark-sent", "--path", path], { timeout: 5000 });
+        ctx.log.debug(`Marked Gringo sticker as sent: ${path}`);
+      } catch (err) {
+        ctx.log.debug(`Failed to mark Gringo sticker as sent: ${path}: ${String(err)}`);
+      }
+    }),
+  );
 }
 
 async function collectEmittedToolOutputMediaUrls(
@@ -1006,6 +1069,8 @@ export async function handleToolExecutionEnd(
   if (!isToolError && isMessagingSend) {
     if (committedMediaUrls.length > 0) {
       ctx.state.messagingToolSentMediaUrls.push(...committedMediaUrls);
+      clearPendingToolMediaSentByMessagingTool(ctx, committedMediaUrls);
+      await markGringoStickerSentAfterMessagingTool(ctx, committedMediaUrls);
       ctx.trimMessagingToolSent();
     }
   }

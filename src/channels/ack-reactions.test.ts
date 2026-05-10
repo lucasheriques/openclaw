@@ -153,7 +153,19 @@ describe("shouldAckReactionForWhatsApp", () => {
     ).toBe(false);
   });
 
-  it("honors mentions or activation for group-mentions", () => {
+  it("honors explicit mentions for group-mentions", () => {
+    expect(
+      shouldAckReactionForWhatsApp({
+        emoji: "👀",
+        isDirect: false,
+        isGroup: true,
+        directEnabled: true,
+        groupMode: "mentions",
+        wasMentioned: true,
+        groupActivated: false,
+      }),
+    ).toBe(true);
+
     expect(
       shouldAckReactionForWhatsApp({
         emoji: "👀",
@@ -164,7 +176,7 @@ describe("shouldAckReactionForWhatsApp", () => {
         wasMentioned: false,
         groupActivated: true,
       }),
-    ).toBe(true);
+    ).toBe(false);
 
     expect(
       shouldAckReactionForWhatsApp({

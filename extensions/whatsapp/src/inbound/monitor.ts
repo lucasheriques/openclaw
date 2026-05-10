@@ -49,6 +49,7 @@ import {
 import { DisconnectReason, isJidGroup } from "./runtime-api.js";
 import { createWebSendApi } from "./send-api.js";
 import { normalizeWhatsAppSendResult } from "./send-result.js";
+import { runWithWhatsAppTurnQuoteKey, type WhatsAppTurnQuoteKey } from "./turn-context.js";
 import type { WebInboundMessage, WebListenerCloseReason } from "./types.js";
 
 const LOGGED_OUT_STATUS = DisconnectReason?.loggedOut ?? 401;
@@ -225,6 +226,7 @@ export async function attachWebInboxToSocket(
   type QueuedInboundMessage = WebInboundMessage & {
     dedupeKey?: string;
     debounceKey?: string;
+    triggerQuoteKey?: WhatsAppTurnQuoteKey;
   };
   const inboundDebounceMs = Math.max(0, Math.trunc(options.debounceMs ?? 0));
   const pendingDebounceKeys = new Set<string>();
@@ -280,9 +282,12 @@ export async function attachWebInboxToSocket(
         if (!last) {
           return;
         }
+        const triggerKey = last.triggerQuoteKey;
+        const runTurn = <T>(fn: () => Promise<T>): Promise<T> =>
+          triggerKey ? runWithWhatsAppTurnQuoteKey(triggerKey, fn) : fn();
         try {
           if (entries.length === 1) {
-            await options.onMessage(last);
+            await runTurn(() => options.onMessage(last));
             await finalizeInboundDedupe(entries);
             return;
           }
@@ -303,7 +308,7 @@ export async function attachWebInboxToSocket(
             mentionedJids: mentioned.size > 0 ? Array.from(mentioned) : undefined,
             isBatched: true,
           };
-          await options.onMessage(combinedMessage);
+          await runTurn(() => options.onMessage(combinedMessage));
           await finalizeInboundDedupe(entries);
         } catch (error) {
           await finalizeInboundDedupe(entries, error);
@@ -663,19 +668,31 @@ export async function attachWebInboxToSocket(
       inboundMedia: Awaited<ReturnType<typeof downloadInboundMedia>>,
     ) => {
       if (!inboundMedia) {
-        return;
+        return undefined;
       }
       mediaPath = inboundMedia.saved.path;
       mediaType = inboundMedia.mimetype;
       mediaFileName = inboundMedia.fileName;
+      return inboundMedia.saved;
     };
     try {
       const inboundMedia = await downloadInboundMedia(msg as proto.IWebMessageInfo, sock, maxBytes);
       await saveInboundMedia(inboundMedia);
-      if (!mediaPath && replyContext) {
-        await saveInboundMedia(
-          await downloadQuotedInboundMedia(msg as proto.IWebMessageInfo, sock, maxBytes),
+      if (replyContext) {
+        const quotedMedia = await downloadQuotedInboundMedia(
+          msg as proto.IWebMessageInfo,
+          sock,
+          maxBytes,
         );
+        const shouldPromoteQuotedMedia = !mediaPath;
+        const saved = shouldPromoteQuotedMedia
+          ? await saveInboundMedia(quotedMedia)
+          : quotedMedia?.saved;
+        if (quotedMedia && saved) {
+          const typeHint = quotedMedia.mimetype ? `${quotedMedia.mimetype}, quoted` : "quoted";
+          const marker = `[media attached: ${saved.path} (${typeHint})]`;
+          body = body ? `${body}\n\n${marker}` : marker;
+        }
       }
     } catch (err) {
       logWhatsAppVerbose(options.verbose, `Inbound media download failed: ${String(err)}`);
@@ -798,6 +815,16 @@ export async function attachWebInboxToSocket(
       mediaType: enriched.mediaType,
       mediaFileName: enriched.mediaFileName,
       dedupeKey: inbound.id ? `${options.accountId}:${inbound.remoteJid}:${inbound.id}` : undefined,
+      triggerQuoteKey:
+        inbound.group && inbound.id
+          ? {
+              id: inbound.id,
+              remoteJid: inbound.remoteJid,
+              fromMe: Boolean(msg.key?.fromMe),
+              participant: inbound.participantJid,
+              messageText: enriched.body,
+            }
+          : undefined,
     };
     const debounceKey = buildInboundDebounceKey(inboundMessage);
     if (debounceKey) {

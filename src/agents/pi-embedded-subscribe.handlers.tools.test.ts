@@ -1114,6 +1114,59 @@ describe("messaging tool media URL tracking", () => {
     expect(ctx.state.pendingMessagingMediaUrls.has("tool-m2")).toBe(false);
   });
 
+  it("clears pending tool media after messaging tool sends derived media", async () => {
+    const { ctx } = createTestContext();
+    ctx.state.pendingToolMediaUrls = ["file:///img.jpg", "file:///other.jpg"];
+    ctx.state.pendingToolAudioAsVoice = true;
+    ctx.state.pendingToolTrustedLocalMedia = true;
+
+    await handleToolExecutionStart(ctx, {
+      type: "tool_execution_start",
+      toolName: "message",
+      toolCallId: "tool-m2-clear",
+      args: { action: "send", to: "channel:123", content: "hi", media: "file:///sticker.webp" },
+    });
+
+    await handleToolExecutionEnd(ctx, {
+      type: "tool_execution_end",
+      toolName: "message",
+      toolCallId: "tool-m2-clear",
+      isError: false,
+      result: { ok: true },
+    });
+
+    expect(ctx.state.messagingToolSentMediaUrls).toContain("file:///sticker.webp");
+    expect(ctx.state.pendingToolMediaUrls).toEqual([]);
+    expect(ctx.state.pendingToolAudioAsVoice).toBe(false);
+    expect(ctx.state.pendingToolTrustedLocalMedia).toBe(false);
+  });
+
+  it("clears pending tool media flags when messaging tool sends the last pending file", async () => {
+    const { ctx } = createTestContext();
+    ctx.state.pendingToolMediaUrls = ["file:///img.jpg"];
+    ctx.state.pendingToolAudioAsVoice = true;
+    ctx.state.pendingToolTrustedLocalMedia = true;
+
+    await handleToolExecutionStart(ctx, {
+      type: "tool_execution_start",
+      toolName: "message",
+      toolCallId: "tool-m2-clear-last",
+      args: { action: "send", to: "channel:123", content: "hi", media: "file:///img.jpg" },
+    });
+
+    await handleToolExecutionEnd(ctx, {
+      type: "tool_execution_end",
+      toolName: "message",
+      toolCallId: "tool-m2-clear-last",
+      isError: false,
+      result: { ok: true },
+    });
+
+    expect(ctx.state.pendingToolMediaUrls).toEqual([]);
+    expect(ctx.state.pendingToolAudioAsVoice).toBe(false);
+    expect(ctx.state.pendingToolTrustedLocalMedia).toBe(false);
+  });
+
   it("commits mediaUrls from tool result payload", async () => {
     const { ctx } = createTestContext();
 

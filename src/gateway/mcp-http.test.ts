@@ -23,6 +23,10 @@ type ScopedToolsCall = {
   accountId?: string;
   messageProvider?: string;
   inboundEventKind?: string;
+  currentChannelId?: string;
+  currentThreadTs?: string;
+  currentMessageId?: string;
+  replyToMode?: string;
   senderIsOwner?: boolean;
   surface?: string;
   excludeToolNames?: Iterable<string>;
@@ -155,7 +159,7 @@ afterEach(async () => {
 });
 
 describe("mcp loopback server", () => {
-  it("passes session, account, message channel, and inbound event headers into shared tool resolution", async () => {
+  it("passes session, account, message channel, inbound event, and threading headers into shared tool resolution", async () => {
     const port = await getFreePortBlockWithPermissionFallback({
       offsets: [0],
       fallbackBase: 53_000,
@@ -172,6 +176,10 @@ describe("mcp loopback server", () => {
         "x-openclaw-account-id": "work",
         "x-openclaw-message-channel": "telegram",
         "x-openclaw-inbound-event-kind": "room_event",
+        "x-openclaw-current-channel-id": "telegram:-1003841603622",
+        "x-openclaw-current-thread-ts": "928",
+        "x-openclaw-current-message-id": "2284",
+        "x-openclaw-reply-to-mode": "all",
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     });
@@ -182,6 +190,10 @@ describe("mcp loopback server", () => {
     expect(call.accountId).toBe("work");
     expect(call.messageProvider).toBe("telegram");
     expect(call.inboundEventKind).toBe("room_event");
+    expect(call.currentChannelId).toBe("telegram:-1003841603622");
+    expect(call.currentThreadTs).toBe("928");
+    expect(call.currentMessageId).toBe("2284");
+    expect(call.replyToMode).toBe("all");
     expect(call.senderIsOwner).toBe(false);
     expect(call.surface).toBe("loopback");
     expect(Array.from(call.excludeToolNames ?? [])).toEqual([
@@ -705,6 +717,18 @@ describe("createMcpLoopbackServerConfig", () => {
     );
     expect(config.mcpServers?.openclaw?.headers?.["x-openclaw-message-channel"]).toBe(
       "${OPENCLAW_MCP_MESSAGE_CHANNEL}",
+    );
+    expect(config.mcpServers?.openclaw?.headers?.["x-openclaw-inbound-event-kind"]).toBe(
+      "${OPENCLAW_MCP_INBOUND_EVENT_KIND}",
+    );
+    expect(config.mcpServers?.openclaw?.headers?.["x-openclaw-current-channel-id"]).toBe(
+      "${OPENCLAW_MCP_CURRENT_CHANNEL_ID}",
+    );
+    expect(config.mcpServers?.openclaw?.headers?.["x-openclaw-current-message-id"]).toBe(
+      "${OPENCLAW_MCP_CURRENT_MESSAGE_ID}",
+    );
+    expect(config.mcpServers?.openclaw?.headers?.["x-openclaw-reply-to-mode"]).toBe(
+      "${OPENCLAW_MCP_REPLY_TO_MODE}",
     );
     expect(config.mcpServers?.openclaw?.headers?.["x-openclaw-sender-is-owner"]).toBeUndefined();
   });

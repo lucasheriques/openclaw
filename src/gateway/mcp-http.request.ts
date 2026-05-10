@@ -31,6 +31,10 @@ type McpRequestContext = {
   messageProvider: string | undefined;
   accountId: string | undefined;
   inboundEventKind: InboundEventKind | undefined;
+  currentChannelId: string | undefined;
+  currentThreadTs: string | undefined;
+  currentMessageId: string | undefined;
+  replyToMode: "off" | "first" | "all" | "batched" | undefined;
   senderIsOwner: boolean;
 };
 
@@ -175,12 +179,23 @@ export function resolveMcpRequestContext(
   cfg: OpenClawConfig,
   auth: { senderIsOwner: boolean },
 ): McpRequestContext {
+  const replyToMode = normalizeOptionalString(getHeader(req, "x-openclaw-reply-to-mode"));
   return {
     sessionKey: resolveScopedSessionKey(cfg, getHeader(req, "x-session-key")),
     messageProvider:
       normalizeMessageChannel(getHeader(req, "x-openclaw-message-channel")) ?? undefined,
     accountId: normalizeOptionalString(getHeader(req, "x-openclaw-account-id")),
     inboundEventKind: normalizeMcpInboundEventKind(getHeader(req, "x-openclaw-inbound-event-kind")),
+    currentChannelId: normalizeOptionalString(getHeader(req, "x-openclaw-current-channel-id")),
+    currentThreadTs: normalizeOptionalString(getHeader(req, "x-openclaw-current-thread-ts")),
+    currentMessageId: normalizeOptionalString(getHeader(req, "x-openclaw-current-message-id")),
+    replyToMode:
+      replyToMode === "off" ||
+      replyToMode === "first" ||
+      replyToMode === "all" ||
+      replyToMode === "batched"
+        ? replyToMode
+        : undefined,
     senderIsOwner: auth.senderIsOwner,
   };
 }

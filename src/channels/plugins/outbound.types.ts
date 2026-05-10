@@ -31,6 +31,8 @@ export type ChannelOutboundContext = {
   formatting?: OutboundDeliveryFormattingOptions;
   threadId?: string | number | null;
   accountId?: string | null;
+  requesterSenderId?: string | null;
+  requesterSenderE164?: string | null;
   identity?: OutboundIdentity;
   deps?: OutboundSendDeps;
   silent?: boolean;

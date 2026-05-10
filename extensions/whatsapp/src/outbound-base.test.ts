@@ -381,6 +381,104 @@ describe("createWhatsAppOutboundBase", () => {
     });
   });
 
+  it("uses the requester sender as group quote participant when cache metadata is missing", async () => {
+    const sendMessageWhatsApp = vi.fn(async () => ({
+      messageId: "msg-group-fallback",
+      toJid: "120363400000000000@g.us",
+    }));
+    const outbound = createWhatsAppOutboundBase({
+      chunker: (text) => [text],
+      sendMessageWhatsApp,
+      sendPollWhatsApp: vi.fn(),
+      shouldLogVerbose: () => false,
+      resolveTarget: ({ to }) => ({ ok: true as const, to: to ?? "" }),
+    });
+
+    await outbound.sendMedia!({
+      cfg: {
+        channels: {
+          whatsapp: {
+            accounts: {
+              default: {},
+            },
+          },
+        },
+      } as never,
+      to: "120363400000000000@g.us",
+      text: "",
+      mediaUrl: "/tmp/sticker.webp",
+      accountId: "default",
+      requesterSenderId: "+5511976136970",
+      deps: { sendWhatsApp: sendMessageWhatsApp },
+      replyToId: "reply-group-fallback",
+    });
+
+    expect(sendMessageWhatsApp).toHaveBeenCalledWith(
+      "120363400000000000@g.us",
+      "",
+      expect.objectContaining({
+        quotedMessageKey: {
+          id: "reply-group-fallback",
+          remoteJid: "120363400000000000@g.us",
+          fromMe: false,
+          participant: "5511976136970@s.whatsapp.net",
+          messageText: undefined,
+        },
+      }),
+    );
+  });
+
+  it("prefers requester sender over cached group participant for current-message quotes", async () => {
+    cacheInboundMessageMeta("default", "120363400000000000@g.us", "reply-group-cached", {
+      participant: "49534545727556:1@s.whatsapp.net",
+      body: "cached body",
+    });
+    const sendMessageWhatsApp = vi.fn(async () => ({
+      messageId: "msg-group-current",
+      toJid: "120363400000000000@g.us",
+    }));
+    const outbound = createWhatsAppOutboundBase({
+      chunker: (text) => [text],
+      sendMessageWhatsApp,
+      sendPollWhatsApp: vi.fn(),
+      shouldLogVerbose: () => false,
+      resolveTarget: ({ to }) => ({ ok: true as const, to: to ?? "" }),
+    });
+
+    await outbound.sendMedia!({
+      cfg: {
+        channels: {
+          whatsapp: {
+            accounts: {
+              default: {},
+            },
+          },
+        },
+      } as never,
+      to: "120363400000000000@g.us",
+      text: "",
+      mediaUrl: "/tmp/sticker.webp",
+      accountId: "default",
+      requesterSenderId: "+5511976136970",
+      deps: { sendWhatsApp: sendMessageWhatsApp },
+      replyToId: "reply-group-cached",
+    });
+
+    expect(sendMessageWhatsApp).toHaveBeenCalledWith(
+      "120363400000000000@g.us",
+      "",
+      expect.objectContaining({
+        quotedMessageKey: {
+          id: "reply-group-cached",
+          remoteJid: "120363400000000000@g.us",
+          fromMe: false,
+          participant: "5511976136970@s.whatsapp.net",
+          messageText: "cached body",
+        },
+      }),
+    );
+  });
+
   it("normalizes mediaUrls before payload delivery", async () => {
     const sendMessageWhatsApp = vi.fn(async () => ({
       messageId: "msg-1",

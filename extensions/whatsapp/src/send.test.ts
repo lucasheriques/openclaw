@@ -225,6 +225,23 @@ describe("web outbound", () => {
     expect(sendMessage).toHaveBeenLastCalledWith("+1555", "    indented", undefined, undefined);
   });
 
+  it("does not send composing presence for media sends", async () => {
+    loadWebMediaMock.mockResolvedValueOnce({
+      buffer: Buffer.from("img"),
+      contentType: "image/jpeg",
+      kind: "image",
+    });
+
+    await sendMessageWhatsApp("+1555", "", {
+      verbose: false,
+      cfg: WHATSAPP_TEST_CFG,
+      mediaUrl: "/tmp/pic.jpg",
+    });
+
+    expect(sendComposingTo).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith("+1555", "", Buffer.from("img"), "image/jpeg");
+  });
+
   it("skips whitespace-only text sends without media", async () => {
     const result = await sendMessageWhatsApp("+1555", "\n \t", {
       verbose: false,

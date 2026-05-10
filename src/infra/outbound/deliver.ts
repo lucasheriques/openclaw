@@ -189,6 +189,8 @@ type ChannelHandlerParams = {
   channel: Exclude<OutboundChannel, "none">;
   to: string;
   accountId?: string;
+  requesterSenderId?: string | null;
+  requesterSenderE164?: string | null;
   replyToId?: string | null;
   replyToMode?: ReplyToMode;
   formatting?: OutboundDeliveryFormattingOptions;
@@ -564,6 +566,8 @@ function createChannelOutboundContextBase(
     cfg: params.cfg,
     to: params.to,
     accountId: params.accountId,
+    requesterSenderId: params.requesterSenderId,
+    requesterSenderE164: params.requesterSenderE164,
     replyToId: params.replyToId,
     replyToMode: params.replyToMode,
     formatting: params.formatting,
@@ -626,6 +630,8 @@ type DeliverOutboundPayloadsCoreParams = {
   channel: Exclude<OutboundChannel, "none">;
   to: string;
   accountId?: string;
+  requesterSenderId?: string | null;
+  requesterSenderE164?: string | null;
   payloads: ReplyPayload[];
   replyToId?: string | null;
   replyToMode?: ReplyToMode;

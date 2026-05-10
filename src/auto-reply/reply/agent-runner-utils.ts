@@ -34,6 +34,7 @@ import {
 export { resolveModelFallbackOptions } from "./agent-runner-run-params.js";
 import { resolveOriginMessageProvider, resolveOriginMessageTo } from "./origin-routing.js";
 import type { FollowupRun } from "./queue.js";
+import { resolveReplyToMode } from "./reply-threading.js";
 
 const BUN_FETCH_SOCKET_ERROR_RE = /socket connection was closed unexpectedly/i;
 
@@ -119,10 +120,17 @@ export function buildThreadingToolContext(params: {
       currentMessageId,
     };
   }
+  const replyToMode = resolveReplyToMode(
+    config,
+    originProvider,
+    sessionCtx.AccountId,
+    sessionCtx.ChatType,
+  );
   const rawProvider = normalizeOptionalLowercaseString(originProvider);
   if (!rawProvider) {
     return {
       currentMessageId,
+      replyToMode,
     };
   }
   const provider = normalizeChannelId(rawProvider) ?? normalizeAnyChannelId(rawProvider);
@@ -133,6 +141,7 @@ export function buildThreadingToolContext(params: {
       currentChannelId: normalizeOptionalString(originTo),
       currentChannelProvider: provider ?? (rawProvider as ChannelId),
       currentMessageId,
+      replyToMode,
       hasRepliedRef,
     };
   }
@@ -158,6 +167,7 @@ export function buildThreadingToolContext(params: {
     ...context,
     currentChannelProvider: provider!, // guaranteed non-null since threading exists
     currentMessageId: context.currentMessageId ?? currentMessageId,
+    replyToMode: context.replyToMode ?? replyToMode,
   };
 }
 

@@ -352,6 +352,19 @@ describe("gateway url override hardening", () => {
         },
       },
     },
+    {
+      name: "forwards requester sender identity in gateway send params",
+      params: {
+        requesterSenderId: "+15551234567",
+        requesterSenderE164: "+15551234567",
+      },
+      expected: {
+        params: {
+          requesterSenderId: "+15551234567",
+          requesterSenderE164: "+15551234567",
+        },
+      },
+    },
   ])("$name", async ({ params, expected }) => {
     const result = await sendThreadChatGatewayMessage(params);
     for (const [key, value] of Object.entries(expected)) {

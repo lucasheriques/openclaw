@@ -91,6 +91,7 @@ import {
 } from "./agent-runner-failure-copy.js";
 import {
   buildEmbeddedRunExecutionParams,
+  buildThreadingToolContext,
   resolveQueuedReplyRuntimeConfig,
   resolveModelFallbackOptions,
 } from "./agent-runner-utils.js";
@@ -1635,6 +1636,11 @@ export async function runAgentTurnWithFallback(params: {
               originatingChannel: params.followupRun.originatingChannel,
               provider: params.sessionCtx.Provider,
             });
+            const cliThreadingContext = buildThreadingToolContext({
+              sessionCtx: params.sessionCtx,
+              config: runtimeConfig,
+              hasRepliedRef: params.opts?.hasRepliedRef,
+            });
             const result = await runCliAgentWithLifecycle({
               runId,
               provider: cliExecutionProvider,
@@ -1700,6 +1706,10 @@ export async function runAgentTurnWithFallback(params: {
                 skillsSnapshot: params.followupRun.run.skillsSnapshot,
                 messageChannel: params.followupRun.originatingChannel ?? undefined,
                 messageProvider: hookMessageProvider,
+                currentChannelId: cliThreadingContext.currentChannelId,
+                currentThreadTs: cliThreadingContext.currentThreadTs,
+                currentMessageId: cliThreadingContext.currentMessageId,
+                replyToMode: cliThreadingContext.replyToMode,
                 agentAccountId: params.followupRun.run.agentAccountId,
                 senderIsOwner: params.followupRun.run.senderIsOwner,
                 disableTools: params.opts?.disableTools,

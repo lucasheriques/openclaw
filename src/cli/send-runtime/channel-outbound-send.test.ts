@@ -64,6 +64,40 @@ describe("createChannelOutboundRuntimeSend", () => {
     expect(params.gifPlayback).toBe(true);
   });
 
+  it("forwards requester metadata for media reply delivery", async () => {
+    const sendMedia = vi.fn(async () => ({ channel: "whatsapp", messageId: "wa-reply" }));
+    mocks.loadChannelOutboundAdapter.mockResolvedValue({
+      sendText: vi.fn(),
+      sendMedia,
+    });
+
+    const { createChannelOutboundRuntimeSend } = await import("./channel-outbound-send.js");
+    const runtimeSend = createChannelOutboundRuntimeSend({
+      channelId: "whatsapp" as never,
+      unavailableMessage: "unavailable",
+    });
+
+    await runtimeSend.sendMessage("120363400000000000@g.us", "", {
+      cfg: {},
+      mediaUrl: "file:///tmp/sticker.webp",
+      accountId: "default",
+      replyToId: "wamid.reply",
+      requesterSenderId: "5511999999999@s.whatsapp.net",
+      requesterSenderE164: "+5511999999999",
+    });
+
+    expect(sendMedia).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "120363400000000000@g.us",
+        mediaUrl: "file:///tmp/sticker.webp",
+        accountId: "default",
+        replyToId: "wamid.reply",
+        requesterSenderId: "5511999999999@s.whatsapp.net",
+        requesterSenderE164: "+5511999999999",
+      }),
+    );
+  });
+
   it("falls back to sendText for text-only sends", async () => {
     const sendText = vi.fn(async () => ({ channel: "whatsapp", messageId: "wa-2" }));
     mocks.loadChannelOutboundAdapter.mockResolvedValue({

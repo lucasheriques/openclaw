@@ -106,23 +106,34 @@ export async function downloadQuotedInboundMedia(
   maxBytes = 50 * 1024 * 1024,
 ): Promise<{ saved: SavedMedia; mimetype?: string; fileName?: string } | undefined> {
   const message = unwrapMessage(msg.message as proto.IMessage | undefined);
-  const contextInfo = extractContextInfo(message);
-  if (!contextInfo?.quotedMessage) {
+  if (!message) {
     return undefined;
   }
-  const quotedMessage = contextInfo.quotedMessage;
-  return downloadInboundMedia(
-    {
-      key: {
-        id: contextInfo?.stanzaId || undefined,
-        remoteJid: contextInfo.remoteJid ?? msg.key?.remoteJid ?? undefined,
-        participant: contextInfo?.participant ?? undefined,
-        fromMe: false,
-      },
-      message: quotedMessage,
-      messageTimestamp: msg.messageTimestamp,
+  const contextInfo = extractContextInfo(message);
+  const quoted = unwrapMessage(contextInfo?.quotedMessage as proto.IMessage | undefined);
+  if (!quoted) {
+    return undefined;
+  }
+  if (
+    !quoted.imageMessage &&
+    !quoted.videoMessage &&
+    !quoted.documentMessage &&
+    !quoted.audioMessage &&
+    !quoted.stickerMessage
+  ) {
+    return undefined;
+  }
+  const mimetype = resolveMediaMimetype(quoted);
+  const fileName = quoted.documentMessage?.fileName ?? undefined;
+  const synthetic: WAMessage = {
+    key: {
+      id: contextInfo?.stanzaId || undefined,
+      remoteJid: contextInfo?.remoteJid ?? msg.key?.remoteJid ?? undefined,
+      participant: contextInfo?.participant ?? undefined,
+      fromMe: false,
     },
-    sock,
-    maxBytes,
-  );
+    message: quoted,
+    messageTimestamp: msg.messageTimestamp,
+  };
+  return downloadInboundMedia(synthetic, sock, maxBytes);
 }

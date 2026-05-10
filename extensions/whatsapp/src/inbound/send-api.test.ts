@@ -6,6 +6,7 @@ import { listMessageReceiptPlatformIds } from "openclaw/plugin-sdk/channel-messa
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveWhatsAppOutboundMentions } from "./outbound-mentions.js";
 import { createWebSendApi } from "./send-api.js";
+import { runWithWhatsAppTurnQuoteKey } from "./turn-context.js";
 
 const recordChannelActivity = vi.hoisted(() => vi.fn());
 
@@ -494,6 +495,100 @@ describe("createWebSendApi", () => {
       remoteJid: "277038292303944@lid",
       id: "quoted-1",
     });
+  });
+
+  it("passes quoted options when sending stickers", async () => {
+    const payload = Buffer.from("webp");
+
+    await api.sendMessage("12345@g.us", "", payload, "image/webp", {
+      quotedMessageKey: {
+        id: "quoted-sticker",
+        remoteJid: "12345@g.us",
+        fromMe: false,
+        participant: "5511999999999@s.whatsapp.net",
+        messageText: "quoted sticker request",
+      },
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      "12345@g.us",
+      { sticker: payload },
+      expect.objectContaining({
+        quoted: expect.objectContaining({
+          key: expect.objectContaining({
+            remoteJid: "12345@g.us",
+            id: "quoted-sticker",
+            participant: "5511999999999@s.whatsapp.net",
+          }),
+          message: { conversation: "quoted sticker request" },
+        }),
+      }),
+    );
+  });
+
+  it("drops unsafe group quotes without participant or preview text", async () => {
+    await api.sendMessage("12345@g.us", "hello", undefined, undefined, {
+      quotedMessageKey: {
+        id: "missing-meta",
+        remoteJid: "12345@g.us",
+        fromMe: false,
+      },
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith("12345@g.us", { text: "hello" });
+  });
+
+  it("drops unsafe group quotes without preview text", async () => {
+    await api.sendMessage("12345@g.us", "hello", undefined, undefined, {
+      quotedMessageKey: {
+        id: "missing-text",
+        remoteJid: "12345@g.us",
+        fromMe: false,
+        participant: "5511999999999@s.whatsapp.net",
+      },
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith("12345@g.us", { text: "hello" });
+  });
+
+  it("prefers the ambient current-turn quote over matching explicit quote metadata", async () => {
+    const payload = Buffer.from("webp");
+
+    await runWithWhatsAppTurnQuoteKey(
+      {
+        id: "quoted-current",
+        remoteJid: "12345@g.us",
+        fromMe: false,
+        participant: "lid-participant@lid",
+        messageText: "ambient body",
+      },
+      async () => {
+        await api.sendMessage("12345@g.us", "", payload, "image/webp", {
+          quotedMessageKey: {
+            id: "quoted-current",
+            remoteJid: "12345@g.us",
+            fromMe: false,
+            participant: "wrong@s.whatsapp.net",
+            messageText: "explicit body",
+          },
+        });
+      },
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      "12345@g.us",
+      { sticker: payload },
+      expect.objectContaining({
+        quoted: expect.objectContaining({
+          key: expect.objectContaining({
+            remoteJid: "12345@g.us",
+            id: "quoted-current",
+            participant: "lid-participant@lid",
+          }),
+          message: { conversation: "ambient body" },
+        }),
+      }),
+    );
   });
 });
 

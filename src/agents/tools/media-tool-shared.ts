@@ -530,10 +530,19 @@ export function resolveMediaToolLocalRoots(
   _mediaSources?: readonly string[],
 ): string[] {
   const workspaceDir = normalizeWorkspaceDir(workspaceDirRaw);
-  if (options?.workspaceOnly) {
-    return workspaceDir ? [workspaceDir] : [];
-  }
+  // Media inspection (image/pdf/audio tools) still needs read access to the
+  // shared OpenClaw-managed media roots even under workspaceOnly, because an
+  // agent's own exec-produced artifacts (charts, generated images) are
+  // written under ~/.openclaw/workspace/media/<agent>-* — a sibling of the
+  // agent workspace, not a child. Outbound delivery via `message(media=...)`
+  // already allows those paths (see getAgentScopedMediaLocalRoots); the
+  // inspection tools should mirror that, or the agent can't read back what
+  // it just produced for outbound. Security surface is unchanged: these
+  // roots are all under OpenClaw's state dir, not arbitrary filesystem.
   const roots = getDefaultLocalRoots();
+  if (options?.workspaceOnly) {
+    return workspaceDir ? Array.from(new Set([...roots, workspaceDir])) : [...roots];
+  }
   return workspaceDir ? Array.from(new Set([...roots, workspaceDir])) : [...roots];
 }
 

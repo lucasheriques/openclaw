@@ -27,6 +27,7 @@ import { formatError } from "../session.js";
 import { convertMarkdownTables } from "../text-runtime.js";
 import { markdownToWhatsApp } from "../text-runtime.js";
 import { whatsappOutboundLog } from "./loggers.js";
+import { consumeSentinelForFile, rescueOrphanMedia } from "./orphan-media-rescue.js";
 import type { WebInboundMsg } from "./types.js";
 import { elide } from "./util.js";
 
@@ -132,6 +133,23 @@ export async function deliverWebReply(params: {
   const textChunks = chunkMarkdownTextWithMode(convertedText, textLimit, chunkMode);
   const mediaList = normalizedReply.mediaUrls ?? [];
 
+  // Orphan-chart rescue: when an agent renders a chart but forgets to
+  // call `message(media=...)` before the turn ends, ngr-analysis left a
+  // `.auto-attach` sentinel next to the PNG. Rescue here so the file
+  // still ships. Sentinels are single-use and time-windowed (5 min) so
+  // this can't resurrect stale artifacts. See orphan-media-rescue.ts.
+  if (mediaList.length === 0) {
+    const rescued = await rescueOrphanMedia(params.mediaLocalRoots);
+    for (const entry of rescued) {
+      mediaList.push(entry.path);
+    }
+    if (rescued.length > 0) {
+      whatsappOutboundLog.info(
+        `rescued ${rescued.length} orphan media attachment(s) to ${msg.from}`,
+      );
+    }
+  }
+
   const getQuote = () => {
     if (!replyResult.replyToId) {
       return undefined;
@@ -218,20 +236,22 @@ export async function deliverWebReply(params: {
       }
       if (media.kind === "image") {
         const quote = getQuote();
+        const isWebpSticker = media.mimetype === "image/webp";
         rememberSendResult(
           await sendWithRetry(
             () =>
               msg.sendMedia(
-                {
-                  image: media.buffer,
-                  caption,
-                  mimetype: media.mimetype,
-                },
+                isWebpSticker
+                  ? { sticker: media.buffer }
+                  : { image: media.buffer, caption, mimetype: media.mimetype },
                 quote,
               ),
-            "media:image",
+            isWebpSticker ? "media:sticker" : "media:image",
           ),
         );
+        if (isWebpSticker && caption) {
+          rememberSendResult(await sendWithRetry(() => msg.reply(caption, quote), "media:sticker-text"));
+        }
       } else if (media.kind === "audio") {
         const quote = getQuote();
         rememberSendResult(
@@ -290,6 +310,11 @@ export async function deliverWebReply(params: {
       whatsappOutboundLog.info(
         `Sent media reply to ${msg.from} (${(media.buffer.length / (1024 * 1024)).toFixed(2)}MB)`,
       );
+      // Consume any sibling sentinel so the orphan-rescue path doesn't
+      // re-ship this file on the next turn. Applies whether the send
+      // came from an explicit `message(media=...)` call or from the
+      // rescue itself — whichever path wins, the sentinel dies here.
+      await consumeSentinelForFile(mediaUrl);
       replyLogger.info(
         {
           correlationId: msg.id ?? newConnectionId(),

@@ -19,6 +19,8 @@ type RuntimeSendOpts = {
   threadTs?: string | number;
   replyToId?: string | number | null;
   replyToMessageId?: string | number;
+  requesterSenderId?: string | null;
+  requesterSenderE164?: string | null;
   silent?: boolean;
   forceDocument?: boolean;
   formatting?: OutboundDeliveryFormattingOptions;
@@ -56,6 +58,8 @@ export function createChannelOutboundRuntimeSend(params: {
         accountId: opts.accountId,
         threadId,
         replyToId,
+        requesterSenderId: opts.requesterSenderId,
+        requesterSenderE164: opts.requesterSenderE164,
         silent: opts.silent,
         forceDocument: opts.forceDocument,
         formatting:

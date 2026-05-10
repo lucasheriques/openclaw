@@ -28,6 +28,10 @@ export class McpLoopbackToolCache {
     messageProvider: string | undefined;
     accountId: string | undefined;
     inboundEventKind: InboundEventKind | undefined;
+    currentChannelId: string | undefined;
+    currentThreadTs: string | undefined;
+    currentMessageId: string | undefined;
+    replyToMode: "off" | "first" | "all" | "batched" | undefined;
     senderIsOwner: boolean | undefined;
   }): CachedScopedTools {
     const cacheKey = [
@@ -35,6 +39,10 @@ export class McpLoopbackToolCache {
       params.messageProvider ?? "",
       params.accountId ?? "",
       params.inboundEventKind ?? "",
+      params.currentChannelId ?? "",
+      params.currentThreadTs ?? "",
+      params.currentMessageId ?? "",
+      params.replyToMode ?? "",
       params.senderIsOwner === true ? "owner" : "non-owner",
     ].join("\u0000");
     const now = Date.now();
@@ -49,6 +57,10 @@ export class McpLoopbackToolCache {
       messageProvider: params.messageProvider,
       accountId: params.accountId,
       inboundEventKind: params.inboundEventKind,
+      currentChannelId: params.currentChannelId,
+      currentThreadTs: params.currentThreadTs,
+      currentMessageId: params.currentMessageId,
+      replyToMode: params.replyToMode,
       senderIsOwner: params.senderIsOwner,
       surface: "loopback",
       excludeToolNames: NATIVE_TOOL_EXCLUDE,

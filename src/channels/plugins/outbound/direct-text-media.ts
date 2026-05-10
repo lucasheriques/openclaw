@@ -10,6 +10,8 @@ import type { ChannelOutboundAdapter } from "../types.adapters.js";
 type DirectSendOptions = {
   cfg: OpenClawConfig;
   accountId?: string | null;
+  requesterSenderId?: string | null;
+  requesterSenderE164?: string | null;
   replyToId?: string | null;
   mediaUrl?: string;
   mediaAccess?: OutboundMediaAccess;
@@ -74,6 +76,8 @@ export function createDirectTextMediaOutbound<
     to: string;
     text: string;
     accountId?: string | null;
+    requesterSenderId?: string | null;
+    requesterSenderE164?: string | null;
     deps?: OutboundSendDeps;
     replyToId?: string | null;
     mediaUrl?: string;
@@ -95,6 +99,8 @@ export function createDirectTextMediaOutbound<
         mediaLocalRoots: sendParams.mediaAccess?.localRoots,
         mediaReadFile: sendParams.mediaAccess?.readFile,
         accountId: sendParams.accountId,
+        requesterSenderId: sendParams.requesterSenderId,
+        requesterSenderE164: sendParams.requesterSenderE164,
         replyToId: sendParams.replyToId,
         maxBytes,
       }),
@@ -110,12 +116,23 @@ export function createDirectTextMediaOutbound<
     sanitizeText: ({ text }) => sanitizeForPlainText(text),
     sendPayload: async (ctx) =>
       await sendTextMediaPayload({ channel: params.channel, ctx, adapter: outbound }),
-    sendText: async ({ cfg, to, text, accountId, deps, replyToId }) => {
+    sendText: async ({
+      cfg,
+      to,
+      text,
+      accountId,
+      requesterSenderId,
+      requesterSenderE164,
+      deps,
+      replyToId,
+    }) => {
       return await sendDirect({
         cfg,
         to,
         text,
         accountId,
+        requesterSenderId,
+        requesterSenderE164,
         deps,
         replyToId,
         buildOptions: params.buildTextOptions,
@@ -130,6 +147,8 @@ export function createDirectTextMediaOutbound<
       mediaLocalRoots,
       mediaReadFile,
       accountId,
+      requesterSenderId,
+      requesterSenderE164,
       deps,
       replyToId,
     }) => {
@@ -147,6 +166,8 @@ export function createDirectTextMediaOutbound<
               }
             : undefined),
         accountId,
+        requesterSenderId,
+        requesterSenderE164,
         deps,
         replyToId,
         buildOptions: params.buildMediaOptions,
