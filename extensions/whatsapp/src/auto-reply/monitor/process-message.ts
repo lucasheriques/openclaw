@@ -1,3 +1,4 @@
+import { execFile, type ExecFileException, type ExecFileOptions } from "node:child_process";
 import {
   logAckFailure,
   removeAckReactionHandleAfterReply,
@@ -76,12 +77,338 @@ const WHATSAPP_MESSAGE_RECEIVED_HOOK_LIMITS = {
   timeoutMs: 2_000,
 };
 
+const GRINGO_AGENT_ID = "gringo";
+const GRINGO_IDENTITY_PRELOAD_DEFAULT_TIMEOUT_MS = 2_500;
+const GRINGO_IDENTITY_PRELOAD_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+const GRINGO_IDENTITY_PRELOAD_SESSION_MAX_ENTRIES = 1000;
+const gringoIdentityPreloadedDmSessions = new Map<
+  string,
+  { workingContext: string; cachedAtMs: number }
+>();
+
 type WhatsAppMessageReceivedHookConfig = {
   pluginHooks?: {
     messageReceived?: unknown;
   };
   accounts?: Record<string, unknown>;
 };
+
+type GringoIdentityPreloadStatus =
+  | "skipped"
+  | "cached"
+  | "group_hint"
+  | "success"
+  | "unknown"
+  | "timeout"
+  | "error";
+
+type GringoIdentityPreloadResult = {
+  status: GringoIdentityPreloadStatus;
+  durationMs: number;
+  bodyForAgentPrefix?: string;
+  contextLength?: number;
+  coachingContextLoaded?: boolean;
+  coachingContextChars?: number;
+  coachingContextVersion?: string;
+  userProfileContextLoaded?: boolean;
+  userProfileContextChars?: number;
+  trustedContextChars?: number;
+  openClawSessionKeyForwarded?: boolean;
+  error?: string;
+};
+
+function resolveGringoIdentityPreloadTimeoutMs(): number {
+  const raw = process.env.OPENCLAW_GRINGO_IDENTITY_PRELOAD_TIMEOUT_MS?.trim();
+  if (!raw) {
+    return GRINGO_IDENTITY_PRELOAD_DEFAULT_TIMEOUT_MS;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : GRINGO_IDENTITY_PRELOAD_DEFAULT_TIMEOUT_MS;
+}
+
+function resolveGringoNgrBin(): string {
+  return process.env.GRINGO_NGR_BIN?.trim() || process.env.NGR_BIN?.trim() || "ngr";
+}
+
+function resolveGringoWorkspaceCwd(): string | undefined {
+  return (
+    process.env.GRINGO_WORKSPACE_DIR?.trim() || process.env.OPENCLAW_GRINGO_WORKSPACE_DIR?.trim()
+  );
+}
+
+function isUnknownGringoUserContext(stdout: string): boolean {
+  return /unknown user|not map to a known user/i.test(stdout);
+}
+
+function isProcessTimeoutError(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === "object" &&
+    "killed" in error &&
+    (error as { killed?: boolean }).killed,
+  );
+}
+
+export function clearGringoIdentityPreloadSessionCacheForTests(): void {
+  gringoIdentityPreloadedDmSessions.clear();
+}
+
+function shouldForceGringoIdentityPreload(text: string | undefined): boolean {
+  if (!text) {
+    return false;
+  }
+  return /(?:refresh|reload|atualiz|recarreg).*(?:context|perfil|assinatura)|(?:context|perfil|assinatura).*(?:refresh|reload|atualiz|recarreg)/i.test(
+    text,
+  );
+}
+
+function formatGringoCachedIdentityHint(): string {
+  return "Trusted session context: loaded. Refresh only if asked.";
+}
+
+function formatGringoPreloadedIdentityHint(): string {
+  return "Trusted context for this turn is preloaded. Do not reload profile/coaching files unless updating memory.";
+}
+
+function getCachedGringoIdentityWorkingContext(sessionCacheKey: string): string | undefined {
+  const entry = gringoIdentityPreloadedDmSessions.get(sessionCacheKey);
+  if (!entry) {
+    return undefined;
+  }
+  if (Date.now() - entry.cachedAtMs > GRINGO_IDENTITY_PRELOAD_SESSION_TTL_MS) {
+    gringoIdentityPreloadedDmSessions.delete(sessionCacheKey);
+    return undefined;
+  }
+  return entry.workingContext;
+}
+
+function setCachedGringoIdentityWorkingContext(
+  sessionCacheKey: string,
+  workingContext: string,
+): void {
+  gringoIdentityPreloadedDmSessions.set(sessionCacheKey, {
+    workingContext,
+    cachedAtMs: Date.now(),
+  });
+  if (gringoIdentityPreloadedDmSessions.size <= GRINGO_IDENTITY_PRELOAD_SESSION_MAX_ENTRIES) {
+    return;
+  }
+  for (const key of gringoIdentityPreloadedDmSessions.keys()) {
+    gringoIdentityPreloadedDmSessions.delete(key);
+    if (gringoIdentityPreloadedDmSessions.size <= GRINGO_IDENTITY_PRELOAD_SESSION_MAX_ENTRIES) {
+      break;
+    }
+  }
+}
+
+function formatGringoGroupIdentityHint(params: { phone: string; senderJid?: string }): string {
+  return [
+    `Trusted WhatsApp group sender: ${params.phone}${params.senderJid ? ` (${params.senderJid})` : ""}.`,
+    "Profile context is not preloaded in groups to keep the turn small. If the reply needs the sender's NaGringa profile, subscription/access, resume, jobs, or personalization, identify on demand with `ngr coach context --phone <trusted_phone> --surface group`; otherwise answer directly.",
+  ].join("\n");
+}
+
+function readObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function readBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function parseGringoCoachContextOutput(output: string): {
+  prompt: string;
+  workingContext?: string;
+  coachingContextLoaded?: boolean;
+  coachingContextChars?: number;
+  coachingContextVersion?: string;
+  userProfileContextLoaded?: boolean;
+  userProfileContextChars?: number;
+  trustedContextChars?: number;
+} | null {
+  try {
+    const envelope = JSON.parse(output) as unknown;
+    const data = readObject(readObject(envelope)?.data) ?? readObject(envelope);
+    if (!data) {
+      return null;
+    }
+    const prompt = readString(data.prompt);
+    if (!prompt) {
+      return null;
+    }
+    const coachingState = readObject(data.coachingState);
+    const userProfile = readObject(data.userProfile);
+    return {
+      prompt,
+      workingContext: readString(data.workingContext),
+      coachingContextLoaded: readBoolean(coachingState?.loaded),
+      coachingContextChars: readNumber(coachingState?.included),
+      coachingContextVersion: readString(coachingState?.updatedAt),
+      userProfileContextLoaded: readBoolean(userProfile?.loaded),
+      userProfileContextChars: readNumber(userProfile?.included),
+      trustedContextChars: prompt.length,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function preloadGringoIdentityContext(params: {
+  agentId: string;
+  chatType: "direct" | "group";
+  sessionKey?: string;
+  correlationId?: string;
+  inboundText?: string;
+  refreshText?: string;
+  phone?: string;
+  senderJid?: string;
+  accountId?: string;
+}): Promise<GringoIdentityPreloadResult> {
+  const startedAt = Date.now();
+  if (
+    params.agentId !== GRINGO_AGENT_ID ||
+    process.env.OPENCLAW_GRINGO_IDENTITY_PRELOAD === "0" ||
+    !params.phone
+  ) {
+    return { status: "skipped", durationMs: 0 };
+  }
+  if (params.chatType === "group") {
+    return {
+      status: "group_hint",
+      durationMs: Date.now() - startedAt,
+      bodyForAgentPrefix: formatGringoGroupIdentityHint({
+        phone: params.phone,
+        senderJid: params.senderJid,
+      }),
+      contextLength: params.phone.length,
+    };
+  }
+
+  const sessionCacheKey =
+    params.sessionKey && process.env.OPENCLAW_GRINGO_IDENTITY_PRELOAD_EVERY_TURN !== "1"
+      ? `${params.agentId}:${params.sessionKey}`
+      : undefined;
+  const cachedHint =
+    sessionCacheKey && !shouldForceGringoIdentityPreload(params.refreshText ?? params.inboundText)
+      ? getCachedGringoIdentityWorkingContext(sessionCacheKey)
+      : undefined;
+  if (sessionCacheKey && cachedHint) {
+    return {
+      status: "cached",
+      durationMs: Date.now() - startedAt,
+      bodyForAgentPrefix: cachedHint,
+      contextLength: cachedHint.length,
+      openClawSessionKeyForwarded: true,
+    };
+  }
+
+  const phone = params.phone;
+  const timeoutMs = resolveGringoIdentityPreloadTimeoutMs();
+  const ngrBin = resolveGringoNgrBin();
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    OPENCLAW_SHELL: "exec",
+    OPENCLAW_CALLER_CHANNEL: "whatsapp",
+    OPENCLAW_CALLER_PHONE: phone,
+    OPENCLAW_AGENT_ID: params.agentId,
+    OPENCLAW_CHAT_TYPE: params.chatType,
+  };
+  if (params.correlationId) {
+    env.OPENCLAW_CORRELATION_ID = params.correlationId;
+    env.OPENCLAW_TURN_ID = params.correlationId;
+  }
+  if (params.inboundText) {
+    env.OPENCLAW_INBOUND_TEXT = params.inboundText;
+  }
+  if (params.sessionKey) {
+    env.OPENCLAW_SESSION_KEY = params.sessionKey;
+  }
+  if (params.senderJid) {
+    env.OPENCLAW_CALLER_JID = params.senderJid;
+  }
+  if (params.accountId) {
+    env.OPENCLAW_CALLER_ACCOUNT_ID = params.accountId;
+  }
+
+  return new Promise((resolve) => {
+    const cwd = resolveGringoWorkspaceCwd();
+    const execOptions: ExecFileOptions = {
+      encoding: "utf8",
+      env,
+      maxBuffer: 256 * 1024,
+      timeout: timeoutMs,
+    };
+    if (cwd) {
+      execOptions.cwd = cwd;
+    }
+
+    execFile(
+      ngrBin,
+      [
+        "coach",
+        "context",
+        "--phone",
+        phone,
+        "--surface",
+        "dm",
+        "--max-chars",
+        process.env.OPENCLAW_GRINGO_COACH_CONTEXT_MAX_CHARS?.trim() || "3000",
+        "--format",
+        "json",
+      ],
+      execOptions,
+      (error: ExecFileException | null, stdoutRaw: string | Buffer, stderrRaw: string | Buffer) => {
+        const durationMs = Date.now() - startedAt;
+        const output = stdoutRaw.toString().trim();
+        if (output) {
+          const status = isUnknownGringoUserContext(output) ? "unknown" : "success";
+          const parsedContext = parseGringoCoachContextOutput(output);
+          const prompt = parsedContext?.prompt ?? output;
+          const promptForAgent = `${formatGringoPreloadedIdentityHint()}\n\n${prompt}`;
+          if (sessionCacheKey) {
+            setCachedGringoIdentityWorkingContext(
+              sessionCacheKey,
+              parsedContext?.workingContext ?? formatGringoCachedIdentityHint(),
+            );
+          }
+          resolve({
+            status,
+            durationMs,
+            bodyForAgentPrefix: promptForAgent,
+            contextLength: promptForAgent.length,
+            coachingContextLoaded: parsedContext?.coachingContextLoaded,
+            coachingContextChars: parsedContext?.coachingContextChars,
+            coachingContextVersion: parsedContext?.coachingContextVersion,
+            userProfileContextLoaded: parsedContext?.userProfileContextLoaded,
+            userProfileContextChars: parsedContext?.userProfileContextChars,
+            trustedContextChars: parsedContext?.trustedContextChars,
+            openClawSessionKeyForwarded: !!params.sessionKey,
+          });
+          return;
+        }
+
+        const message = error ? formatError(error) : stderrRaw.toString().trim();
+        resolve({
+          status: isProcessTimeoutError(error) ? "timeout" : "error",
+          durationMs,
+          error: elide(message || "identity preload returned no output", 240),
+        });
+      },
+    );
+  });
+}
 
 function readWhatsAppMessageReceivedHookOptIn(value: unknown): boolean | undefined {
   if (!value || typeof value !== "object") {
@@ -397,6 +724,42 @@ export async function processMessage(params: {
   }
 
   const sender = getSenderIdentity(params.msg);
+  const identityPreload = await preloadGringoIdentityContext({
+    agentId: params.route.agentId,
+    chatType: params.msg.chatType,
+    sessionKey: params.route.sessionKey,
+    correlationId,
+    inboundText: combinedBody,
+    refreshText: params.msg.body,
+    phone: sender.e164 ?? params.msg.senderE164,
+    senderJid: params.msg.senderJid,
+    accountId: params.route.accountId ?? params.msg.accountId,
+  });
+  if (params.route.agentId === GRINGO_AGENT_ID && identityPreload.status !== "skipped") {
+    params.replyLogger.info(
+      {
+        accountId: params.route.accountId ?? params.msg.accountId,
+        agentId: params.route.agentId,
+        correlationId,
+        chatType: params.msg.chatType,
+        identityPreloadStatus: identityPreload.status,
+        identityPreloadDurationMs: identityPreload.durationMs,
+        identityPreloadContextLength: identityPreload.contextLength ?? null,
+        coachingContextLoaded: identityPreload.coachingContextLoaded ?? null,
+        coachingContextChars: identityPreload.coachingContextChars ?? null,
+        coachingContextVersion: identityPreload.coachingContextVersion ?? null,
+        userProfileContextLoaded: identityPreload.userProfileContextLoaded ?? null,
+        userProfileContextChars: identityPreload.userProfileContextChars ?? null,
+        trustedContextChars: identityPreload.trustedContextChars ?? null,
+        openClawSessionKeyForwarded: identityPreload.openClawSessionKeyForwarded ?? null,
+        identityPreloadError: identityPreload.error ?? null,
+      },
+      "gringo identity preload completed",
+    );
+  }
+  const bodyForAgent = identityPreload.bodyForAgentPrefix
+    ? `${identityPreload.bodyForAgentPrefix}\n\nUser message:\n${msgForAgent.body}`
+    : msgForAgent.body;
   const visibleReplyTo = resolveVisibleWhatsAppReplyContext({
     msg: params.msg,
     authDir: account.authDir,
@@ -461,7 +824,7 @@ export async function processMessage(params: {
         });
 
   const ctxPayload = buildWhatsAppInboundContext({
-    bodyForAgent: msgForAgent.body,
+    bodyForAgent,
     combinedBody,
     commandBody: params.msg.body,
     commandAuthorized,

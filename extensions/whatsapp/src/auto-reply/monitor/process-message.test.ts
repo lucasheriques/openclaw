@@ -9,6 +9,7 @@ const {
   runMessageReceivedMock,
   shouldComputeCommandAuthorizedMock,
   trackBackgroundTaskMock,
+  execFileMock,
 } = vi.hoisted(() => ({
   resolvePolicyMock: vi.fn(),
   buildContextMock: vi.fn(),
@@ -16,6 +17,7 @@ const {
   runMessageReceivedMock: vi.fn(async () => undefined),
   shouldComputeCommandAuthorizedMock: vi.fn(() => false),
   trackBackgroundTaskMock: vi.fn(),
+  execFileMock: vi.fn(),
 }));
 
 function acceptedSendResult(kind: "media" | "text", id: string): WhatsAppSendResult {
@@ -119,6 +121,14 @@ vi.mock("./message-line.js", async (importOriginal) => {
   return { ...actual, buildInboundLine: () => "hi" };
 });
 
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    execFile: execFileMock,
+  };
+});
+
 vi.mock("./runtime-api.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./runtime-api.js")>();
   return {
@@ -146,7 +156,10 @@ vi.mock("./runtime-api.js", async (importOriginal) => {
 });
 
 import { clearInternalHooks, registerInternalHook } from "openclaw/plugin-sdk/hook-runtime";
-import { processMessage } from "./process-message.js";
+import {
+  clearGringoIdentityPreloadSessionCacheForTests,
+  processMessage,
+} from "./process-message.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -202,11 +215,13 @@ const baseRoute = {
   matchedBy: "default",
 };
 
-function callProcessMessage(overrides: { cfg?: unknown; msg?: unknown } = {}) {
+function callProcessMessage(
+  overrides: { cfg?: unknown; msg?: unknown; route?: unknown; replyLogger?: unknown } = {},
+) {
   return processMessage({
     cfg: (overrides.cfg ?? {}) as never,
     msg: (overrides.msg ?? baseMsg) as never,
-    route: baseRoute as never,
+    route: (overrides.route ?? baseRoute) as never,
     groupHistoryKey: "whatsapp:default:group:123@g.us",
     groupHistories: new Map(),
     groupMemberNames: new Map(),
@@ -214,7 +229,12 @@ function callProcessMessage(overrides: { cfg?: unknown; msg?: unknown } = {}) {
     verbose: false,
     maxMediaBytes: 1024,
     replyResolver: (async () => undefined) as never,
-    replyLogger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as never,
+    replyLogger: (overrides.replyLogger ?? {
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+      debug: () => {},
+    }) as never,
     backgroundTasks: new Set(),
     rememberSentText: () => {},
     echoHas: () => false,
@@ -248,6 +268,10 @@ describe("processMessage group system prompt wiring", () => {
     shouldComputeCommandAuthorizedMock.mockReset();
     shouldComputeCommandAuthorizedMock.mockReturnValue(false);
     trackBackgroundTaskMock.mockClear();
+    execFileMock.mockReset();
+    clearGringoIdentityPreloadSessionCacheForTests();
+    delete process.env.OPENCLAW_GRINGO_IDENTITY_PRELOAD;
+    delete process.env.OPENCLAW_GRINGO_IDENTITY_PRELOAD_EVERY_TURN;
     clearInternalHooks();
     buildContextMock.mockImplementation(
       (params: { groupSystemPrompt?: string; combinedBody?: string }) => ({
@@ -258,6 +282,7 @@ describe("processMessage group system prompt wiring", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     clearInternalHooks();
   });
 
@@ -452,6 +477,376 @@ describe("processMessage group system prompt wiring", () => {
 
     expect(runMessageReceivedMock).not.toHaveBeenCalled();
     expect(internalReceived).not.toHaveBeenCalled();
+  });
+
+  it("preloads Gringo identity context into the agent-facing body", async () => {
+    const replyInfo = vi.fn();
+    resolvePolicyMock.mockReturnValue(makePolicy(makeAccount()));
+    execFileMock.mockImplementation(
+      (
+        _bin: string,
+        _args: string[],
+        _options: unknown,
+        callback: (error: null, stdout: string, stderr: string) => void,
+      ) => {
+        callback(
+          null,
+          JSON.stringify({
+            ok: true,
+            data: {
+              prompt:
+                "Trusted NaGringa coaching context\n\n# Alice - paid yearly\n\n- **Access:** paid yearly · DM: enabled\n\n## Coaching State Memory\n\nActive loop: Nubank",
+              workingContext:
+                "Trusted NaGringa working context\n- User: Alice · paid yearly · DM: enabled\n- Role: Senior Product Engineer\n- Coaching memory: loaded\n- Use this as the trusted identity/context card. Refresh only if asked or after profile/memory updates.",
+              coachingState: {
+                loaded: true,
+                included: 19,
+                updatedAt: "2026-05-06T00:00:00Z",
+              },
+              userProfile: {
+                loaded: true,
+                included: 8,
+              },
+            },
+          }),
+          "",
+        );
+      },
+    );
+    buildContextMock.mockImplementationOnce((params: { bodyForAgent?: string }) => ({
+      Body: "hi",
+      BodyForAgent: params.bodyForAgent,
+      RawBody: "hi",
+      CommandBody: "hi",
+      SessionKey: "agent:gringo:whatsapp:direct:+15550002222",
+      Provider: "whatsapp",
+      Surface: "whatsapp",
+    }));
+
+    await callProcessMessage({
+      msg: {
+        ...baseMsg,
+        from: "+15550002222",
+        conversationId: "+15550002222",
+        chatId: "+15550002222",
+        chatType: "direct",
+        senderE164: "+15550002222",
+        senderJid: "15550002222@s.whatsapp.net",
+      },
+      route: {
+        ...baseRoute,
+        agentId: "gringo",
+        sessionKey: "agent:gringo:whatsapp:direct:+15550002222",
+        mainSessionKey: "agent:gringo:whatsapp:direct:+15550002222",
+      },
+      replyLogger: {
+        info: replyInfo,
+        warn: () => {},
+        error: () => {},
+        debug: () => {},
+      },
+    });
+
+    expect(execFileMock).toHaveBeenCalledWith(
+      "ngr",
+      [
+        "coach",
+        "context",
+        "--phone",
+        "+15550002222",
+        "--surface",
+        "dm",
+        "--max-chars",
+        "3000",
+        "--format",
+        "json",
+      ],
+      expect.objectContaining({
+        env: expect.objectContaining({
+          OPENCLAW_CALLER_CHANNEL: "whatsapp",
+          OPENCLAW_CALLER_PHONE: "+15550002222",
+          OPENCLAW_CALLER_JID: "15550002222@s.whatsapp.net",
+          OPENCLAW_AGENT_ID: "gringo",
+          OPENCLAW_CHAT_TYPE: "direct",
+          OPENCLAW_SESSION_KEY: "agent:gringo:whatsapp:direct:+15550002222",
+          OPENCLAW_CORRELATION_ID: "msg1",
+          OPENCLAW_TURN_ID: "msg1",
+          OPENCLAW_INBOUND_TEXT: "hi",
+        }),
+        timeout: 2500,
+      }),
+      expect.any(Function),
+    );
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain(
+      "Trusted context for this turn is preloaded.",
+    );
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain(
+      "Trusted NaGringa coaching context",
+    );
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain("Active loop: Nubank");
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain("User message:\nhi");
+    expect(replyInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "gringo",
+        identityPreloadStatus: "success",
+        identityPreloadContextLength: expect.any(Number),
+        coachingContextLoaded: true,
+        coachingContextChars: 19,
+        coachingContextVersion: "2026-05-06T00:00:00Z",
+        userProfileContextLoaded: true,
+        userProfileContextChars: 8,
+        trustedContextChars: expect.any(Number),
+        openClawSessionKeyForwarded: true,
+      }),
+      "gringo identity preload completed",
+    );
+  });
+
+  it("injects only a compact trusted sender hint into group messages", async () => {
+    const replyInfo = vi.fn();
+    resolvePolicyMock.mockReturnValue(makePolicy(makeAccount()));
+    await callProcessMessage({
+      msg: {
+        ...baseMsg,
+        chatType: "group",
+        senderE164: "+15550002222",
+        senderJid: "15550002222@s.whatsapp.net",
+      },
+      route: {
+        ...baseRoute,
+        agentId: "gringo",
+        sessionKey: "agent:gringo:whatsapp:group:123@g.us",
+        mainSessionKey: "agent:gringo:whatsapp:group:123@g.us",
+      },
+      replyLogger: {
+        info: replyInfo,
+        warn: () => {},
+        error: () => {},
+        debug: () => {},
+      },
+    });
+
+    expect(execFileMock).not.toHaveBeenCalled();
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain(
+      "Trusted WhatsApp group sender: +15550002222",
+    );
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain(
+      "ngr coach context --phone <trusted_phone> --surface group",
+    );
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain("User message:\nhi");
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).not.toContain(
+      "Trusted NaGringa coaching context",
+    );
+    expect(replyInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "gringo",
+        chatType: "group",
+        identityPreloadStatus: "group_hint",
+        identityPreloadContextLength: expect.any(Number),
+      }),
+      "gringo identity preload completed",
+    );
+  });
+
+  it("injects full Gringo identity context once per direct session", async () => {
+    resolvePolicyMock.mockReturnValue(makePolicy(makeAccount()));
+    execFileMock.mockImplementation(
+      (
+        _bin: string,
+        _args: string[],
+        _options: unknown,
+        callback: (error: null, stdout: string, stderr: string) => void,
+      ) => {
+        callback(
+          null,
+          JSON.stringify({
+            ok: true,
+            data: {
+              prompt:
+                "Trusted NaGringa coaching context\n\n# Alice - paid yearly\n\n- **Access:** paid yearly · DM: enabled",
+              workingContext:
+                "Trusted NaGringa working context\n- User: Alice · paid yearly · DM: enabled\n- Role: Senior Product Engineer\n- Coaching memory: loaded\n- Use this as the trusted identity/context card. Refresh only if asked or after profile/memory updates.",
+            },
+          }),
+          "",
+        );
+      },
+    );
+    buildContextMock.mockImplementation((params: { bodyForAgent?: string }) => ({
+      Body: "hi",
+      BodyForAgent: params.bodyForAgent,
+      RawBody: "hi",
+      CommandBody: "hi",
+      SessionKey: "agent:gringo:whatsapp:direct:+15550003333",
+      Provider: "whatsapp",
+      Surface: "whatsapp",
+    }));
+    const directMsg = {
+      ...baseMsg,
+      from: "+15550003333",
+      conversationId: "+15550003333",
+      chatId: "+15550003333",
+      chatType: "direct",
+      senderE164: "+15550003333",
+      senderJid: "15550003333@s.whatsapp.net",
+    };
+    const directRoute = {
+      ...baseRoute,
+      agentId: "gringo",
+      sessionKey: "agent:gringo:whatsapp:direct:+15550003333",
+      mainSessionKey: "agent:gringo:whatsapp:direct:+15550003333",
+    };
+
+    await callProcessMessage({ msg: directMsg, route: directRoute });
+    await callProcessMessage({ msg: directMsg, route: directRoute });
+
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain(
+      "Trusted context for this turn is preloaded.",
+    );
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain(
+      "Trusted NaGringa coaching context",
+    );
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain("User message:\nhi");
+    expect(buildContextMock.mock.calls[1][0].bodyForAgent).not.toContain(
+      "Trusted NaGringa coaching context",
+    );
+    expect(buildContextMock.mock.calls[1][0].bodyForAgent).toContain(
+      "Trusted NaGringa working context",
+    );
+    expect(buildContextMock.mock.calls[1][0].bodyForAgent).toContain(
+      "Role: Senior Product Engineer",
+    );
+    expect(buildContextMock.mock.calls[1][0].bodyForAgent).toContain("User message:\nhi");
+  });
+
+  it("refreshes full Gringo identity context on direct turn when requested", async () => {
+    resolvePolicyMock.mockReturnValue(makePolicy(makeAccount()));
+    execFileMock.mockImplementation(
+      (
+        _bin: string,
+        _args: string[],
+        _options: unknown,
+        callback: (error: null, stdout: string, stderr: string) => void,
+      ) => {
+        callback(
+          null,
+          JSON.stringify({
+            ok: true,
+            data: {
+              prompt:
+                "Trusted NaGringa coaching context\n\n# Alice - paid yearly\n\n- **Access:** paid yearly · DM: enabled",
+              workingContext:
+                "Trusted NaGringa working context\n- User: Alice · paid yearly · DM: enabled",
+            },
+          }),
+          "",
+        );
+      },
+    );
+    buildContextMock.mockImplementation((params: { bodyForAgent?: string }) => ({
+      Body: params.bodyForAgent ?? "hi",
+      BodyForAgent: params.bodyForAgent,
+      RawBody: "hi",
+      CommandBody: "hi",
+      SessionKey: "agent:gringo:whatsapp:direct:+15550004444",
+      Provider: "whatsapp",
+      Surface: "whatsapp",
+    }));
+    const directMsg = {
+      ...baseMsg,
+      body: "hi",
+      from: "+15550004444",
+      conversationId: "+15550004444",
+      chatId: "+15550004444",
+      chatType: "direct",
+      senderE164: "+15550004444",
+      senderJid: "15550004444@s.whatsapp.net",
+    };
+    const directRoute = {
+      ...baseRoute,
+      agentId: "gringo",
+      sessionKey: "agent:gringo:whatsapp:direct:+15550004444",
+      mainSessionKey: "agent:gringo:whatsapp:direct:+15550004444",
+    };
+
+    await callProcessMessage({ msg: directMsg, route: directRoute });
+    await callProcessMessage({
+      msg: { ...directMsg, body: "atualiza meu contexto" },
+      route: directRoute,
+    });
+
+    expect(execFileMock).toHaveBeenCalledTimes(2);
+    expect(buildContextMock.mock.calls[1][0].bodyForAgent).toContain(
+      "Trusted NaGringa coaching context",
+    );
+  });
+
+  it("expires cached Gringo identity context after two hours", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-07T12:00:00Z"));
+    resolvePolicyMock.mockReturnValue(makePolicy(makeAccount()));
+    execFileMock.mockImplementation(
+      (
+        _bin: string,
+        _args: string[],
+        _options: unknown,
+        callback: (error: null, stdout: string, stderr: string) => void,
+      ) => {
+        callback(
+          null,
+          JSON.stringify({
+            ok: true,
+            data: {
+              prompt:
+                "Trusted NaGringa coaching context\n\n# Alice - paid yearly\n\n- **Access:** paid yearly · DM: enabled",
+              workingContext:
+                "Trusted NaGringa working context\n- User: Alice · paid yearly · DM: enabled",
+            },
+          }),
+          "",
+        );
+      },
+    );
+    buildContextMock.mockImplementation((params: { bodyForAgent?: string }) => ({
+      Body: params.bodyForAgent ?? "hi",
+      BodyForAgent: params.bodyForAgent,
+      RawBody: "hi",
+      CommandBody: "hi",
+      SessionKey: "agent:gringo:whatsapp:direct:+15550005555",
+      Provider: "whatsapp",
+      Surface: "whatsapp",
+    }));
+    const directMsg = {
+      ...baseMsg,
+      body: "hi",
+      from: "+15550005555",
+      conversationId: "+15550005555",
+      chatId: "+15550005555",
+      chatType: "direct",
+      senderE164: "+15550005555",
+      senderJid: "15550005555@s.whatsapp.net",
+    };
+    const directRoute = {
+      ...baseRoute,
+      agentId: "gringo",
+      sessionKey: "agent:gringo:whatsapp:direct:+15550005555",
+      mainSessionKey: "agent:gringo:whatsapp:direct:+15550005555",
+    };
+
+    await callProcessMessage({ msg: directMsg, route: directRoute });
+    vi.setSystemTime(new Date("2026-05-07T13:59:00Z"));
+    await callProcessMessage({ msg: directMsg, route: directRoute });
+    vi.setSystemTime(new Date("2026-05-07T14:01:00Z"));
+    await callProcessMessage({ msg: directMsg, route: directRoute });
+
+    expect(execFileMock).toHaveBeenCalledTimes(2);
+    expect(buildContextMock.mock.calls[1][0].bodyForAgent).toContain(
+      "Trusted NaGringa working context",
+    );
+    expect(buildContextMock.mock.calls[2][0].bodyForAgent).toContain(
+      "Trusted NaGringa coaching context",
+    );
   });
 
   it("tracks session metadata writes as connection background tasks", async () => {
