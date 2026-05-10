@@ -73,6 +73,7 @@ import {
   resolveCodexPluginsPolicy,
   resolveCodexAppServerRuntimeOptions,
   withMcpElicitationsApprovalPolicy,
+  type CodexAppServerStartOptions,
   type CodexAppServerRuntimeOptions,
   type CodexPluginConfig,
 } from "./config.js";
@@ -179,6 +180,7 @@ const CODEX_NATIVE_HOOK_RELAY_MIN_TTL_MS = 30 * 60_000;
 const CODEX_NATIVE_HOOK_RELAY_TTL_GRACE_MS = 5 * 60_000;
 const CODEX_NATIVE_HOOK_RELAY_RENEW_INTERVAL_MS = 60_000;
 const CODEX_STEER_ALL_DEBOUNCE_MS = 500;
+const GRINGO_AGENT_ID = "gringo";
 const LOG_FIELD_MAX_LENGTH = 160;
 const CODEX_NATIVE_PROJECT_DOC_BASENAMES = new Set(["agents.md"]);
 const CODEX_NATIVE_HOOK_RELAY_EVENTS_WITH_APP_SERVER_APPROVALS =
@@ -275,6 +277,63 @@ function readNumericTimeoutMs(value: unknown): number | undefined {
     }
   }
   return undefined;
+}
+
+function findPathEnvKey(env: Record<string, string | undefined>): string {
+  if (Object.prototype.hasOwnProperty.call(env, "PATH")) {
+    return "PATH";
+  }
+  const candidate = Object.keys(env).find((key) => key.toLowerCase() === "path");
+  return candidate ?? "PATH";
+}
+
+function prependPathSegment(value: string | undefined, segment: string): string {
+  const existing = value?.trim();
+  if (!existing) {
+    return segment;
+  }
+  const parts = existing.split(path.delimiter).filter(Boolean);
+  return parts.includes(segment) ? existing : [segment, ...parts].join(path.delimiter);
+}
+
+function withGringoNgrPathForCodexAppServer(
+  startOptions: CodexAppServerStartOptions,
+  params: { agentId?: string; runId?: string; sessionId?: string; sessionKey?: string },
+): CodexAppServerStartOptions {
+  if (params.agentId !== GRINGO_AGENT_ID) {
+    return startOptions;
+  }
+  const ngrBin = process.env.GRINGO_NGR_BIN?.trim() || process.env.NGR_BIN?.trim();
+  if (!ngrBin || !path.isAbsolute(ngrBin)) {
+    return startOptions;
+  }
+  const env: Record<string, string> = { ...(startOptions.env ?? {}) };
+  const pathKey = findPathEnvKey({ ...process.env, ...env });
+  env[pathKey] = prependPathSegment(env[pathKey] ?? process.env[pathKey], path.dirname(ngrBin));
+  if (!env.NGR_CACHE_DIR?.trim()) {
+    const cacheDir = process.env.NGR_CACHE_DIR?.trim();
+    const homeDir = process.env.HOME?.trim();
+    if (cacheDir && path.isAbsolute(cacheDir)) {
+      env.NGR_CACHE_DIR = cacheDir;
+    } else if (homeDir && path.isAbsolute(homeDir)) {
+      env.NGR_CACHE_DIR = path.join(homeDir, ".ngr", "cache");
+    }
+  }
+  if (params.agentId) {
+    env.OPENCLAW_AGENT_ID = params.agentId;
+  }
+  if (params.runId) {
+    env.OPENCLAW_AGENT_RUN_ID = params.runId;
+    env.OPENCLAW_CORRELATION_ID ??= params.runId;
+    env.OPENCLAW_TURN_ID ??= params.runId;
+  }
+  if (params.sessionId) {
+    env.OPENCLAW_SESSION_ID = params.sessionId;
+  }
+  if (params.sessionKey) {
+    env.OPENCLAW_SESSION_KEY = params.sessionKey;
+  }
+  return { ...startOptions, env };
 }
 
 function formatDynamicToolTimeoutDetails(params: {
@@ -885,6 +944,12 @@ export async function runCodexAppServerAttempt(
   for (const diagnostic of bundleMcpThreadConfig.diagnostics) {
     embeddedAgentLog.warn(`bundle-mcp: ${diagnostic.pluginId}: ${diagnostic.message}`);
   }
+  const appServerStartOptions = withGringoNgrPathForCodexAppServer(appServer.start, {
+    agentId: sessionAgentId,
+    runId: params.runId,
+    sessionId: params.sessionId,
+    sessionKey: sandboxSessionKey,
+  });
   const activeContextEngine = isActiveHarnessContextEngine(params.contextEngine)
     ? params.contextEngine
     : undefined;
@@ -1203,7 +1268,7 @@ export async function runCodexAppServerAttempt(
         let attemptedClient: CodexAppServerClient | undefined;
         const startupAttempt = async () => {
           const startupClient = await attemptClientFactory(
-            appServer.start,
+            appServerStartOptions,
             startupAuthProfileId,
             agentDir,
             params.config,

@@ -30,7 +30,11 @@ import * as approvalBridge from "./approval-bridge.js";
 import * as authBridge from "./auth-bridge.js";
 import { resolveCodexAppServerEnvApiKeyCacheKey } from "./auth-bridge.js";
 import type { CodexAppServerClientFactory } from "./client-factory.js";
-import { readCodexPluginConfig, resolveCodexAppServerRuntimeOptions } from "./config.js";
+import {
+  readCodexPluginConfig,
+  resolveCodexAppServerRuntimeOptions,
+  type CodexAppServerStartOptions,
+} from "./config.js";
 import { CODEX_OPENCLAW_DYNAMIC_TOOL_NAMESPACE } from "./dynamic-tools.js";
 import * as elicitationBridge from "./elicitation-bridge.js";
 import {
@@ -234,6 +238,7 @@ function createAppServerHarness(
   requestImpl: (method: string, params: unknown) => Promise<unknown>,
   options: {
     onStart?: (authProfileId: string | undefined, agentDir: string | undefined) => void;
+    onStartOptions?: (startOptions: CodexAppServerStartOptions | undefined) => void;
   } = {},
 ) {
   const requests: Array<{ method: string; params: unknown }> = [];
@@ -245,7 +250,8 @@ function createAppServerHarness(
     return requestImpl(method, params);
   });
 
-  setCodexAppServerClientFactoryForTest(async (_startOptions, authProfileId, agentDir) => {
+  setCodexAppServerClientFactoryForTest(async (startOptions, authProfileId, agentDir) => {
+    options.onStartOptions?.(startOptions);
     options.onStart?.(authProfileId, agentDir);
     return {
       request,
@@ -320,6 +326,7 @@ function createStartedThreadHarness(
   requestImpl: (method: string, params: unknown) => Promise<unknown> = async () => undefined,
   options: {
     onStart?: (authProfileId: string | undefined, agentDir: string | undefined) => void;
+    onStartOptions?: (startOptions: CodexAppServerStartOptions | undefined) => void;
   } = {},
 ) {
   return createAppServerHarness(async (method, params) => {
@@ -6285,6 +6292,74 @@ describe("runCodexAppServerAttempt", () => {
     expect(seenAuthProfileIds).toEqual(["openai-codex:work"]);
     expect(seenAgentDirs).toEqual([path.join(tempDir, "agent")]);
     expect(requests.map((entry) => entry.method)).toContain("turn/start");
+  });
+
+  it("prepares ngr PATH and cache env for Gringo Codex app-server sessions", async () => {
+    const previousPath = process.env.PATH;
+    const previousGringoNgrBin = process.env.GRINGO_NGR_BIN;
+    const previousNgrCacheDir = process.env.NGR_CACHE_DIR;
+    const previousHome = process.env.HOME;
+    const seenStartOptions: CodexAppServerStartOptions[] = [];
+    try {
+      process.env.PATH = "/usr/bin:/bin";
+      process.env.GRINGO_NGR_BIN = "/Users/lunanova/go/bin/ngr";
+      process.env.HOME = "/Users/lunanova";
+      delete process.env.NGR_CACHE_DIR;
+      const { waitForMethod, completeTurn } = createStartedThreadHarness(undefined, {
+        onStartOptions: (startOptions) => {
+          if (startOptions) {
+            seenStartOptions.push(startOptions);
+          }
+        },
+      });
+      const params = createParams(
+        path.join(tempDir, "session.jsonl"),
+        path.join(tempDir, "workspace"),
+      );
+      params.agentId = "gringo";
+      params.runId = "run-1";
+      params.sessionId = "session-1";
+      params.sessionKey = "agent:gringo:whatsapp:direct:+15550002222";
+
+      const run = runCodexAppServerAttempt(params);
+      await waitForMethod("turn/start");
+      await completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+      await run;
+
+      expect(seenStartOptions[0]?.env?.PATH?.split(path.delimiter)[0]).toBe(
+        "/Users/lunanova/go/bin",
+      );
+      expect(seenStartOptions[0]?.env?.NGR_CACHE_DIR).toBe("/Users/lunanova/.ngr/cache");
+      expect(seenStartOptions[0]?.env?.OPENCLAW_AGENT_ID).toBe("gringo");
+      expect(seenStartOptions[0]?.env?.OPENCLAW_AGENT_RUN_ID).toBe("run-1");
+      expect(seenStartOptions[0]?.env?.OPENCLAW_CORRELATION_ID).toBe("run-1");
+      expect(seenStartOptions[0]?.env?.OPENCLAW_TURN_ID).toBe("run-1");
+      expect(seenStartOptions[0]?.env?.OPENCLAW_SESSION_ID).toBe("session-1");
+      expect(seenStartOptions[0]?.env?.OPENCLAW_SESSION_KEY).toBe(
+        "agent:gringo:whatsapp:direct:+15550002222",
+      );
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+      if (previousGringoNgrBin === undefined) {
+        delete process.env.GRINGO_NGR_BIN;
+      } else {
+        process.env.GRINGO_NGR_BIN = previousGringoNgrBin;
+      }
+      if (previousNgrCacheDir === undefined) {
+        delete process.env.NGR_CACHE_DIR;
+      } else {
+        process.env.NGR_CACHE_DIR = previousNgrCacheDir;
+      }
+      if (previousHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = previousHome;
+      }
+    }
   });
 
   it("times out turn start before the active run handle is installed", async () => {
