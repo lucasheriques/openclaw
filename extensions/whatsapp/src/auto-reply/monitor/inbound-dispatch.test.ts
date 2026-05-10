@@ -946,6 +946,80 @@ describe("whatsapp inbound dispatch", () => {
     expect(rememberSentText).toHaveBeenCalledTimes(1);
   });
 
+  it("logs dispatch telemetry with latency and reply counts", async () => {
+    const deliverReply = vi.fn(async () => acceptedDeliveryResult());
+    const replyLogger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    } as unknown as BufferedReplyParams["replyLogger"];
+    dispatchReplyWithBufferedBlockDispatcherMock.mockImplementationOnce(
+      async (params: {
+        ctx: unknown;
+        dispatcherOptions?: {
+          deliver?: (
+            payload: CapturedReplyPayload,
+            info: { kind: "tool" | "block" | "final" },
+          ) => Promise<void>;
+        };
+      }) => {
+        capturedDispatchParams = params;
+        await params.dispatcherOptions?.deliver?.(
+          { text: "chart ready", mediaUrls: ["/tmp/chart.png"] },
+          { kind: "tool" },
+        );
+        await params.dispatcherOptions?.deliver?.({ text: "final reply" }, { kind: "final" });
+        return { queuedFinal: true, counts: { tool: 1, block: 0, final: 1 } };
+      },
+    );
+
+    await expect(
+      dispatchBufferedReply({
+        deliverReply,
+        msg: makeMsg({ timestamp: Date.now() - 5000 }),
+        replyLogger,
+      }),
+    ).resolves.toBe(true);
+
+    expect(replyLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        correlationId: "msg1",
+        agentId: "main",
+        accountId: "default",
+        sessionKey: "agent:main:whatsapp:direct:+1000",
+        routeMatchedBy: "default",
+        chatType: "direct",
+        inboundBody: "hi",
+        inboundBodyLength: 2,
+        combinedBodyLength: 2,
+        bodyForAgentLength: null,
+        inboundMediaType: null,
+        inboundHasMedia: false,
+        inboundIsBatched: false,
+        replyToId: null,
+        groupHistoryCount: null,
+        disableBlockStreaming: false,
+        responsePrefixEnabled: false,
+        toolCallCount: 1,
+        blockCount: 0,
+        finalCount: 1,
+        outboundPayloadCount: 2,
+        outboundMessageCount: 2,
+        providerAcceptedCount: 2,
+        outboundTextLength: "final reply".length,
+        outboundBody: "final reply",
+        didQueueVisibleReply: true,
+        didSendReply: true,
+        queuedFinal: true,
+        preDispatchLatencyMs: expect.any(Number),
+        dispatchDurationMs: expect.any(Number),
+        endToEndLatencyMs: expect.any(Number),
+      }),
+      "auto-reply dispatch completed",
+    );
+  });
+
   it("does not treat generated WhatsApp text as sent when the provider did not accept it", async () => {
     const deliverReply = vi.fn(async () => unacceptedDeliveryResult());
     const rememberSentText = vi.fn();

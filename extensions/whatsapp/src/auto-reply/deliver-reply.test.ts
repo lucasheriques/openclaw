@@ -267,6 +267,35 @@ describe("deliverWebReply", () => {
     expect(delivery.receipt.parts[0]?.kind).toBe("text");
   });
 
+  it("logs end-to-end latency from the inbound message timestamp", async () => {
+    replyLogger.info.mockClear();
+    const msg = {
+      ...makeMsg(),
+      timestamp: Date.now() - 5000,
+    };
+
+    await deliverWebReply({
+      replyResult: { text: "hello" },
+      msg,
+      maxMediaBytes: 1024 * 1024,
+      textLimit: 200,
+      replyLogger,
+      skipLog: true,
+    });
+
+    expect(replyLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inboundTimestampMs: msg.timestamp,
+        endToEndLatencyMs: expect.any(Number),
+      }),
+      "auto-reply sent (text)",
+    );
+    const [payload] = replyLogger.info.mock.calls.at(-1) ?? [];
+    expect((payload as { endToEndLatencyMs: number }).endToEndLatencyMs).toBeGreaterThanOrEqual(
+      5000,
+    );
+  });
+
   it("reports text replies that Baileys did not accept", async () => {
     const msg = makeMsg();
     vi.mocked(msg.reply).mockResolvedValueOnce(unacceptedSendResult("text"));

@@ -84,6 +84,17 @@ function createWhatsAppReplyDeliveryReceipt(
   });
 }
 
+function normalizeInboundTimestampMs(timestamp: number | undefined): number | null {
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp <= 0) {
+    return null;
+  }
+  return timestamp < 1_000_000_000_000 ? timestamp * 1000 : timestamp;
+}
+
+function computeEndToEndLatencyMs(inboundTimestampMs: number | null, completedAt: number) {
+  return inboundTimestampMs === null ? null : Math.max(0, completedAt - inboundTimestampMs);
+}
+
 export async function deliverWebReply(params: {
   replyResult: ReplyPayload;
   normalizedReplyResult?: DeliverableWhatsAppOutboundPayload<ReplyPayload>;
@@ -102,6 +113,7 @@ export async function deliverWebReply(params: {
 }): Promise<WhatsAppReplyDeliveryResult> {
   const { replyResult, msg, maxMediaBytes, textLimit, replyLogger, connectionId, skipLog } = params;
   const replyStarted = Date.now();
+  const inboundTimestampMs = normalizeInboundTimestampMs(msg.timestamp);
   const sendResults: WhatsAppSendResult[] = [];
   const rememberSendResult = (result: WhatsAppSendResult | undefined) => {
     if (result) {
@@ -194,6 +206,7 @@ export async function deliverWebReply(params: {
       }
     }
     const delivery = finishDelivery();
+    const completedAt = Date.now();
     const logPayload = {
       correlationId: msg.id ?? newConnectionId(),
       connectionId: connectionId ?? null,
@@ -203,7 +216,9 @@ export async function deliverWebReply(params: {
       mediaUrl: null,
       mediaSizeBytes: null,
       mediaKind: null,
-      durationMs: Date.now() - replyStarted,
+      durationMs: completedAt - replyStarted,
+      inboundTimestampMs,
+      endToEndLatencyMs: computeEndToEndLatencyMs(inboundTimestampMs, completedAt),
     };
     if (delivery.providerAccepted) {
       replyLogger.info(logPayload, "auto-reply sent (text)");
@@ -250,7 +265,9 @@ export async function deliverWebReply(params: {
           ),
         );
         if (isWebpSticker && caption) {
-          rememberSendResult(await sendWithRetry(() => msg.reply(caption, quote), "media:sticker-text"));
+          rememberSendResult(
+            await sendWithRetry(() => msg.reply(caption, quote), "media:sticker-text"),
+          );
         }
       } else if (media.kind === "audio") {
         const quote = getQuote();
@@ -315,6 +332,7 @@ export async function deliverWebReply(params: {
       // came from an explicit `message(media=...)` call or from the
       // rescue itself — whichever path wins, the sentinel dies here.
       await consumeSentinelForFile(mediaUrl);
+      const completedAt = Date.now();
       replyLogger.info(
         {
           correlationId: msg.id ?? newConnectionId(),
@@ -325,7 +343,9 @@ export async function deliverWebReply(params: {
           mediaUrl,
           mediaSizeBytes: media.buffer.length,
           mediaKind: media.kind,
-          durationMs: Date.now() - replyStarted,
+          durationMs: completedAt - replyStarted,
+          inboundTimestampMs,
+          endToEndLatencyMs: computeEndToEndLatencyMs(inboundTimestampMs, completedAt),
         },
         "auto-reply sent (media)",
       );

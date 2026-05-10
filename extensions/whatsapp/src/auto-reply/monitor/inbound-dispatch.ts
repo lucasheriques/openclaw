@@ -14,6 +14,7 @@ import {
 } from "../../outbound-media-contract.js";
 import type { WhatsAppReplyDeliveryResult } from "../deliver-reply.js";
 import type { WebInboundMsg } from "../types.js";
+import { elide } from "../util.js";
 import { formatGroupMembers } from "./group-members.js";
 import type { GroupHistoryEntry } from "./inbound-context.js";
 import {
@@ -47,6 +48,18 @@ type ChannelReplyOnModelSelected = NonNullable<
 type WhatsAppDispatchPipeline = {
   responsePrefix?: string;
 } & Record<string, unknown>;
+
+type WhatsAppReplyDispatchTelemetry = {
+  outboundPayloadCount: number;
+  outboundMessageCount: number;
+  providerAcceptedCount: number;
+  outboundTextLength: number;
+  outboundBody: string | null;
+  replyKindsSent: ReplyLifecycleKind[];
+  modelProvider: string | null;
+  model: string | null;
+  thinkLevel: string | null;
+};
 
 type VisibleReplyTarget = {
   id?: string;
@@ -107,6 +120,17 @@ function resolveWhatsAppDisableBlockStreaming(cfg: ReturnType<LoadConfigFn>): bo
     return undefined;
   }
   return !cfg.channels.whatsapp.blockStreaming;
+}
+
+function normalizeInboundTimestampMs(timestamp: number | undefined): number | null {
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp <= 0) {
+    return null;
+  }
+  return timestamp < 1_000_000_000_000 ? timestamp * 1000 : timestamp;
+}
+
+function computeLatencyMs(startedAt: number | null, completedAt: number) {
+  return startedAt === null ? null : Math.max(0, completedAt - startedAt);
 }
 
 function resolveWhatsAppDeliverablePayload(
@@ -497,6 +521,19 @@ export async function dispatchWhatsAppBufferedReply(params: {
   const disableBlockStreaming = sourceRepliesAreToolOnly
     ? true
     : resolveWhatsAppDisableBlockStreaming(params.cfg);
+  const dispatchStartedAt = Date.now();
+  const inboundTimestampMs = normalizeInboundTimestampMs(params.msg.timestamp);
+  const deliveryTelemetry: WhatsAppReplyDispatchTelemetry = {
+    outboundPayloadCount: 0,
+    outboundMessageCount: 0,
+    providerAcceptedCount: 0,
+    outboundTextLength: 0,
+    outboundBody: null,
+    replyKindsSent: [],
+    modelProvider: null,
+    model: null,
+    thinkLevel: null,
+  };
   let didSendReply = false;
   let didLogHeartbeatStrip = false;
 
@@ -521,6 +558,16 @@ export async function dispatchWhatsAppBufferedReply(params: {
       skipLog: false,
       tableMode,
     });
+    deliveryTelemetry.outboundPayloadCount += 1;
+    deliveryTelemetry.outboundMessageCount += delivery.receipt.platformMessageIds.length;
+    if (delivery.providerAccepted) {
+      deliveryTelemetry.providerAcceptedCount += 1;
+      deliveryTelemetry.replyKindsSent.push(info.kind);
+    }
+    deliveryTelemetry.outboundTextLength += normalizedDeliveryPayload.text?.length ?? 0;
+    if (normalizedDeliveryPayload.text) {
+      deliveryTelemetry.outboundBody = elide(normalizedDeliveryPayload.text, 240) ?? null;
+    }
     if (!delivery.providerAccepted) {
       params.replyLogger.warn(
         {
@@ -665,7 +712,12 @@ export async function dispatchWhatsAppBufferedReply(params: {
     replyOptions: {
       disableBlockStreaming,
       ...(sourceReplyDeliveryMode ? { sourceReplyDeliveryMode } : {}),
-      onModelSelected: params.onModelSelected,
+      onModelSelected: (ctx) => {
+        deliveryTelemetry.modelProvider = ctx.provider;
+        deliveryTelemetry.model = ctx.model;
+        deliveryTelemetry.thinkLevel = ctx.thinkLevel ?? "off";
+        params.onModelSelected?.(ctx);
+      },
       ...(statusReactionController
         ? {
             onToolStart: async (payload: { name?: string }) => {
@@ -680,7 +732,59 @@ export async function dispatchWhatsAppBufferedReply(params: {
   });
   logWhatsAppMediaOnlyFlushResult(await mediaOnlyCoalescer.flushAll());
 
+  const dispatchCompletedAt = Date.now();
+  const endToEndLatencyMs = computeLatencyMs(inboundTimestampMs, dispatchCompletedAt);
   const didQueueVisibleReply = hasVisibleInboundReplyDispatch({ queuedFinal, counts });
+  params.replyLogger.info(
+    {
+      correlationId: params.msg.id ?? null,
+      connectionId: params.connectionId,
+      dispatchDurationMs: dispatchCompletedAt - dispatchStartedAt,
+      endToEndLatencyMs,
+      preDispatchLatencyMs: computeLatencyMs(inboundTimestampMs, dispatchStartedAt),
+      toolCallCount: counts.tool,
+      blockCount: counts.block,
+      finalCount: counts.final,
+      outboundPayloadCount: deliveryTelemetry.outboundPayloadCount,
+      outboundMessageCount: deliveryTelemetry.outboundMessageCount,
+      providerAcceptedCount: deliveryTelemetry.providerAcceptedCount,
+      outboundTextLength: deliveryTelemetry.outboundTextLength,
+      outboundBody: deliveryTelemetry.outboundBody,
+      didQueueVisibleReply,
+      didSendReply,
+      queuedFinal,
+      agentId: params.route.agentId,
+      accountId: params.route.accountId ?? params.msg.accountId,
+      chatType: params.msg.chatType,
+      from: params.msg.chatType === "group" ? params.conversationId : params.msg.from,
+      to: params.msg.to,
+      modelProvider: deliveryTelemetry.modelProvider,
+      model: deliveryTelemetry.model,
+      thinkLevel: deliveryTelemetry.thinkLevel,
+      inboundBody: elide(params.msg.body, 240),
+      inboundBodyLength: params.msg.body.length,
+      combinedBodyLength:
+        typeof params.context.Body === "string" ? params.context.Body.length : null,
+      bodyForAgentLength:
+        typeof params.context.BodyForAgent === "string" ? params.context.BodyForAgent.length : null,
+      inboundTimestampMs,
+      inboundMediaType: params.msg.mediaType ?? null,
+      inboundHasMedia: Boolean(params.msg.mediaPath || params.msg.mediaType),
+      inboundIsBatched: params.msg.isBatched === true,
+      conversationId: params.conversationId,
+      chatId: params.msg.chatId ?? null,
+      sessionKey: params.route.sessionKey,
+      routeMatchedBy: params.route.matchedBy,
+      replyToId: params.msg.replyToId ?? null,
+      groupHistoryCount: params.groupHistories.get(params.groupHistoryKey)?.length ?? null,
+      disableBlockStreaming: disableBlockStreaming ?? null,
+      sourceReplyDeliveryMode: sourceReplyDeliveryMode ?? null,
+      chunkMode,
+      tableMode,
+      responsePrefixEnabled: typeof params.replyPipeline.responsePrefix === "string",
+    },
+    "auto-reply dispatch completed",
+  );
   if (!didQueueVisibleReply) {
     if (statusReactionController) {
       void finalizeWhatsAppStatusReaction({
