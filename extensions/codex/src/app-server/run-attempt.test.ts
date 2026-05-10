@@ -3950,6 +3950,138 @@ describe("runCodexAppServerAttempt", () => {
     expect(agentEndContext.sessionId).toBe("session-1");
   });
 
+  it("logs Codex app-server turn telemetry for Axiom correlation", async () => {
+    const info = vi.spyOn(embeddedAgentLog, "info").mockImplementation(() => undefined);
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    const workspaceDir = path.join(tempDir, "workspace");
+    const harness = createStartedThreadHarness();
+    const params = createParams(sessionFile, workspaceDir);
+    params.agentId = "gringo";
+    params.messageProvider = "whatsapp";
+
+    const run = runCodexAppServerAttempt(params);
+    await harness.waitForMethod("turn/start");
+    await harness.notify({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        tokenUsage: {
+          last: {
+            totalTokens: 321,
+            inputTokens: 300,
+            cachedInputTokens: 250,
+            outputTokens: 21,
+          },
+        },
+      },
+    });
+    await harness.notify({
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "commandExecution",
+          id: "cmd-1",
+          command: "ngr jobs match --phone +15550001111 --limit 5 --format json",
+          cwd: workspaceDir,
+          processId: 123,
+          source: "agent",
+          status: "inProgress",
+          commandActions: [],
+          aggregatedOutput: null,
+          exitCode: null,
+          durationMs: null,
+        },
+      },
+    });
+    await harness.notify({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "commandExecution",
+          id: "cmd-1",
+          command: "ngr jobs match --phone +15550001111 --limit 5 --format json",
+          cwd: workspaceDir,
+          processId: 123,
+          source: "agent",
+          status: "completed",
+          commandActions: [],
+          aggregatedOutput: '{"ok":true}',
+          exitCode: 0,
+          durationMs: 14,
+        },
+      },
+    });
+    await harness.notify({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "dynamicToolCall",
+          id: "tool-1",
+          namespace: null,
+          tool: "message",
+          arguments: { action: "send", text: "hello back" },
+          status: "completed",
+          contentItems: [{ type: "inputText", text: "sent" }],
+          success: true,
+          durationMs: 12,
+        },
+      },
+    });
+    await harness.notify({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "msg-1",
+        delta: "hello back",
+      },
+    });
+    await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+    await run;
+
+    const turnLog = info.mock.calls.find(([message]) => message === "agent turn completed");
+    expect(turnLog?.[1]).toEqual(
+      expect.objectContaining({
+        agentRunId: "run-1",
+        agentSessionId: "session-1",
+        sessionKeyHash: expect.any(String),
+        agentId: "gringo",
+        provider: "codex",
+        model: "gpt-5.4-codex",
+        thinkLevel: "medium",
+        messageProvider: "whatsapp",
+        status: "success",
+        durationMs: expect.any(Number),
+        promptSubmitDelayMs: expect.any(Number),
+        modelToFirstToolMs: expect.any(Number),
+        firstMessageToolMs: expect.any(Number),
+        internalToolCallCount: 2,
+        execToolCallCount: 1,
+        messageToolCallCount: 1,
+        uniqueToolNames: "bash,message",
+        inputTokens: 50,
+        outputTokens: 21,
+        cacheReadTokens: 250,
+        totalTokens: 321,
+        assistantTextCount: 1,
+        assistantTextChars: 10,
+        finalPromptChars: 5,
+        itemStartedCount: 2,
+        itemCompletedCount: 2,
+        didSendViaMessagingTool: false,
+        finalPromptPreview: "hello",
+        toolSummary: expect.stringContaining("bash"),
+      }),
+    );
+  });
+
   it("forwards Codex app-server verbose tool summaries and completed output", async () => {
     const onToolResult = vi.fn();
     const sessionFile = path.join(tempDir, "session.jsonl");

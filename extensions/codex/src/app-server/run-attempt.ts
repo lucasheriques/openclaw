@@ -182,6 +182,10 @@ const CODEX_NATIVE_HOOK_RELAY_RENEW_INTERVAL_MS = 60_000;
 const CODEX_STEER_ALL_DEBOUNCE_MS = 500;
 const GRINGO_AGENT_ID = "gringo";
 const LOG_FIELD_MAX_LENGTH = 160;
+const TELEMETRY_HASH_CHARS = 12;
+const TELEMETRY_PREVIEW_CHARS = 240;
+const TELEMETRY_TOOL_SUMMARY_ITEMS = 6;
+const TELEMETRY_TOOL_SUMMARY_CHARS = 512;
 const CODEX_NATIVE_PROJECT_DOC_BASENAMES = new Set(["agents.md"]);
 const CODEX_NATIVE_HOOK_RELAY_EVENTS_WITH_APP_SERVER_APPROVALS =
   CODEX_NATIVE_HOOK_RELAY_EVENTS.filter((event) => event !== "permission_request");
@@ -236,6 +240,48 @@ function emitCodexAppServerEvent(
 
 function collectTerminalAssistantText(result: EmbeddedRunAttemptResult): string {
   return result.assistantTexts.join("\n\n").trim();
+}
+
+function hashForTelemetry(value?: string | null): string | null {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return null;
+  }
+  return createHash("sha256").update(normalized).digest("hex").slice(0, TELEMETRY_HASH_CHARS);
+}
+
+function elideTelemetryText(value: string | undefined, maxChars = TELEMETRY_PREVIEW_CHARS) {
+  if (!value) {
+    return null;
+  }
+  return value.length > maxChars ? `${value.slice(0, maxChars)}...(truncated)` : value;
+}
+
+function computeDurationMs(startedAt: number | undefined, endedAt: number | undefined) {
+  if (startedAt === undefined || endedAt === undefined) {
+    return null;
+  }
+  return Math.max(0, endedAt - startedAt);
+}
+
+function summarizeAttemptTools(toolMetas: Array<{ toolName: string; meta?: string }>) {
+  const toolNames = toolMetas.map((entry) => entry.toolName.trim()).filter(Boolean);
+  const uniqueToolNames = Array.from(new Set(toolNames));
+  const execToolNames = new Set(["bash", "exec"]);
+  const toolSummary = toolMetas
+    .slice(0, TELEMETRY_TOOL_SUMMARY_ITEMS)
+    .map((entry) => {
+      const meta = entry.meta?.trim();
+      return meta ? `${entry.toolName}:${meta}` : entry.toolName;
+    })
+    .join(" | ");
+  return {
+    internalToolCallCount: toolNames.length,
+    execToolCallCount: toolNames.filter((name) => execToolNames.has(name)).length,
+    messageToolCallCount: toolNames.filter((name) => name === "message").length,
+    uniqueToolNames: uniqueToolNames.slice(0, TELEMETRY_TOOL_SUMMARY_ITEMS).join(","),
+    toolSummary: elideTelemetryText(toolSummary, TELEMETRY_TOOL_SUMMARY_CHARS),
+  };
 }
 
 type CodexSteeringQueueOptions = {
@@ -1445,6 +1491,10 @@ export async function runCodexAppServerAttempt(
   const activeOpenClawDynamicToolCallIds = new Set<string>();
   const activeTurnItemIds = new Set<string>();
   let turnCrossedToolHandoff = false;
+  let promptSubmittedAt: number | undefined;
+  let firstToolCallAt: number | undefined;
+  let firstMessageToolCallAt: number | undefined;
+  let firstMessageToolResultAt: number | undefined;
 
   const clearTurnCompletionIdleTimer = () => {
     if (turnCompletionIdleTimer) {
@@ -1952,6 +2002,23 @@ export async function runCodexAppServerAttempt(
       // watchdog armed for that notification.
       disarmTurnCompletionIdleWatch();
     }
+    const telemetryItem = readNotificationItemForTelemetry(notification);
+    const telemetryToolName = telemetryItem ? telemetryToolNameFromItem(telemetryItem) : undefined;
+    if (telemetryToolName && notification.method === "item/started") {
+      const toolStartedAt = Date.now();
+      firstToolCallAt ??= toolStartedAt;
+      if (telemetryToolName === "message") {
+        firstMessageToolCallAt ??= toolStartedAt;
+      }
+    }
+    if (telemetryToolName && notification.method === "item/completed") {
+      const toolCompletedAt = Date.now();
+      firstToolCallAt ??= toolCompletedAt;
+      if (telemetryToolName === "message") {
+        firstMessageToolCallAt ??= toolCompletedAt;
+        firstMessageToolResultAt ??= toolCompletedAt;
+      }
+    }
     // Determine terminal-turn status before invoking the projector so a throw
     // inside projector.handleNotification still releases the session lane.
     // See openclaw/openclaw#67996.
@@ -2076,6 +2143,11 @@ export async function runCodexAppServerAttempt(
       markCurrentTurnRequestProgress();
       turnCrossedToolHandoff = true;
       activeOpenClawDynamicToolCallIds.add(call.callId);
+      const toolCallStartedAt = Date.now();
+      firstToolCallAt ??= toolCallStartedAt;
+      if (call.tool === "message") {
+        firstMessageToolCallAt ??= toolCallStartedAt;
+      }
       trajectoryRecorder?.recordEvent("tool.call", {
         threadId: call.threadId,
         turnId: call.turnId,
@@ -2128,6 +2200,9 @@ export async function runCodexAppServerAttempt(
           });
         },
       });
+      if (call.tool === "message") {
+        firstMessageToolResultAt ??= Date.now();
+      }
       trajectoryRecorder?.recordEvent("tool.result", {
         threadId: call.threadId,
         turnId: call.turnId,
@@ -2431,6 +2506,7 @@ export async function runCodexAppServerAttempt(
     prompt: promptBuild.prompt,
     imagesCount: params.images?.length ?? 0,
   });
+  promptSubmittedAt = Date.now();
   projector = new CodexAppServerEventProjector(params, thread.threadId, activeTurnId, {
     nativePostToolUseRelayEnabled:
       nativeHookRelay?.allowedEvents.includes("post_tool_use") === true &&
@@ -2535,6 +2611,7 @@ export async function runCodexAppServerAttempt(
   try {
     await completion;
     const result = activeProjector.buildResult(toolBridge.telemetry, { yieldDetected });
+    const completedAt = Date.now();
     const finalAborted =
       result.aborted || (runAbortController.signal.aborted && !clientClosedAbort);
     let finalPromptError =
@@ -2572,6 +2649,17 @@ export async function runCodexAppServerAttempt(
     }
     const finalPromptErrorSource =
       timedOut || clientClosedPromptError ? "prompt" : result.promptErrorSource;
+    const attemptStatus = finalPromptError
+      ? "error"
+      : finalAborted || timedOut
+        ? "interrupted"
+        : "success";
+    const attemptToolSummary = summarizeAttemptTools(result.toolMetas);
+    const assistantTextChars = result.assistantTexts.reduce(
+      (total, text) => total + text.length,
+      0,
+    );
+    const finalPromptText = promptBuild.prompt;
     recordCodexTrajectoryCompletion(trajectoryRecorder, {
       attempt: params,
       result,
@@ -2581,7 +2669,7 @@ export async function runCodexAppServerAttempt(
       yieldDetected,
     });
     trajectoryRecorder?.recordEvent("session.ended", {
-      status: finalPromptError ? "error" : finalAborted || timedOut ? "interrupted" : "success",
+      status: attemptStatus,
       threadId: thread.threadId,
       turnId: activeTurnId,
       timedOut,
@@ -2589,6 +2677,39 @@ export async function runCodexAppServerAttempt(
       promptError: normalizeCodexTrajectoryError(finalPromptError),
     });
     trajectoryEndRecorded = true;
+    embeddedAgentLog.info("agent turn completed", {
+      agentRunId: params.runId,
+      agentSessionId: params.sessionId,
+      sessionKeyHash: hashForTelemetry(sandboxSessionKey),
+      agentId: sessionAgentId ?? params.agentId,
+      provider: params.provider,
+      model: params.modelId,
+      thinkLevel: params.thinkLevel,
+      messageProvider: params.messageProvider ?? null,
+      status: attemptStatus,
+      durationMs: completedAt - attemptStartedAt,
+      promptSubmitDelayMs: computeDurationMs(attemptStartedAt, promptSubmittedAt),
+      modelToFirstToolMs: computeDurationMs(promptSubmittedAt, firstToolCallAt),
+      firstMessageToolMs: computeDurationMs(promptSubmittedAt, firstMessageToolCallAt),
+      postMessageModelMs: computeDurationMs(firstMessageToolResultAt, completedAt),
+      internalToolCallCount: attemptToolSummary.internalToolCallCount,
+      execToolCallCount: attemptToolSummary.execToolCallCount,
+      messageToolCallCount: attemptToolSummary.messageToolCallCount,
+      uniqueToolNames: attemptToolSummary.uniqueToolNames,
+      inputTokens: result.attemptUsage?.input ?? null,
+      outputTokens: result.attemptUsage?.output ?? null,
+      cacheReadTokens: result.attemptUsage?.cacheRead ?? null,
+      totalTokens: result.attemptUsage?.total ?? null,
+      assistantTextCount: result.assistantTexts.length,
+      assistantTextChars,
+      finalPromptChars: finalPromptText.length,
+      itemStartedCount: result.itemLifecycle.startedCount,
+      itemCompletedCount: result.itemLifecycle.completedCount,
+      didSendViaMessagingTool: result.didSendViaMessagingTool,
+      lastToolErrorTool: result.lastToolError?.toolName ?? null,
+      finalPromptPreview: elideTelemetryText(finalPromptText),
+      toolSummary: attemptToolSummary.toolSummary,
+    });
     await mirrorTranscriptBestEffort({
       params,
       agentId: sessionAgentId,
@@ -3820,6 +3941,42 @@ function readRawAssistantTextPreview(item: JsonObject): string | undefined {
     return undefined;
   }
   return text.length > 240 ? `${text.slice(0, 237)}...` : text;
+}
+
+function readNotificationItemForTelemetry(
+  notification: CodexServerNotification,
+): JsonObject | undefined {
+  if (notification.method !== "item/started" && notification.method !== "item/completed") {
+    return undefined;
+  }
+  const params = isJsonObject(notification.params) ? notification.params : undefined;
+  const item = params?.item;
+  return isJsonObject(item) ? item : undefined;
+}
+
+function telemetryToolNameFromItem(item: JsonObject): string | undefined {
+  const type = readString(item, "type");
+  if (type === "commandExecution") {
+    return "bash";
+  }
+  if (type === "fileChange") {
+    return "apply_patch";
+  }
+  if (type === "webSearch") {
+    return "web_search";
+  }
+  if (type === "dynamicToolCall") {
+    return readString(item, "tool");
+  }
+  if (type === "mcpToolCall") {
+    const tool = readString(item, "tool");
+    if (!tool) {
+      return undefined;
+    }
+    const server = readString(item, "server");
+    return server ? `${server}.${tool}` : tool;
+  }
+  return undefined;
 }
 
 function isTurnNotification(

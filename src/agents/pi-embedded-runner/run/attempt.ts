@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -547,6 +548,45 @@ export function buildToolSearchRunPlan(params: {
       }),
       ...clientCatalogCallableNames,
     ],
+  };
+}
+
+const TELEMETRY_HASH_CHARS = 12;
+const TELEMETRY_PREVIEW_CHARS = 240;
+const TELEMETRY_TOOL_SUMMARY_ITEMS = 6;
+const TELEMETRY_TOOL_SUMMARY_CHARS = 512;
+
+function hashForTelemetry(value?: string | null): string | null {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return null;
+  }
+  return createHash("sha256").update(normalized).digest("hex").slice(0, TELEMETRY_HASH_CHARS);
+}
+
+function elideTelemetryText(value: string | undefined, maxChars = TELEMETRY_PREVIEW_CHARS) {
+  if (!value) {
+    return null;
+  }
+  return value.length > maxChars ? `${value.slice(0, maxChars)}...(truncated)` : value;
+}
+
+function summarizeAttemptTools(toolMetas: Array<{ toolName: string; meta?: string }>) {
+  const toolNames = toolMetas.map((entry) => entry.toolName.trim()).filter(Boolean);
+  const uniqueToolNames = Array.from(new Set(toolNames));
+  const toolSummary = toolMetas
+    .slice(0, TELEMETRY_TOOL_SUMMARY_ITEMS)
+    .map((entry) => {
+      const meta = entry.meta?.trim();
+      return meta ? `${entry.toolName}:${meta}` : entry.toolName;
+    })
+    .join(" | ");
+  return {
+    internalToolCallCount: toolNames.length,
+    execToolCallCount: toolNames.filter((name) => name === "exec").length,
+    messageToolCallCount: toolNames.filter((name) => name === "message").length,
+    uniqueToolNames: uniqueToolNames.slice(0, TELEMETRY_TOOL_SUMMARY_ITEMS).join(","),
+    toolSummary: elideTelemetryText(toolSummary, TELEMETRY_TOOL_SUMMARY_CHARS),
   };
 }
 
@@ -1141,6 +1181,7 @@ export async function runEmbeddedAttempt(
 ): Promise<EmbeddedRunAttemptResult> {
   const resolvedWorkspace = resolveUserPath(params.workspaceDir);
   const runAbortController = new AbortController();
+  const attemptStartedAt = Date.now();
   configureEmbeddedAttemptHttpRuntime({ timeoutMs: params.timeoutMs });
 
   log.debug(
@@ -4644,6 +4685,11 @@ export async function runEmbeddedAttempt(
         emptyAssistantReplyIsSilent,
         lastAssistantStopReason: lastAssistant?.stopReason,
       });
+      const attemptStatus = attemptTrajectoryTerminal.status;
+      const itemLifecycle = getItemLifecycle();
+      const attemptToolSummary = summarizeAttemptTools(toolMetasNormalized);
+      const assistantTextChars = assistantTexts.reduce((total, text) => total + text.length, 0);
+      const finalPromptChars = finalPromptText?.length ?? 0;
       trajectoryRecorder?.recordEvent("model.completed", {
         aborted,
         externalAbort,
@@ -4664,7 +4710,7 @@ export async function runEmbeddedAttempt(
       trajectoryRecorder?.recordEvent(
         "trace.artifacts",
         buildTrajectoryArtifacts({
-          status: attemptTrajectoryTerminal.status,
+          status: attemptStatus,
           aborted,
           externalAbort,
           timedOut,
@@ -4679,7 +4725,7 @@ export async function runEmbeddedAttempt(
           compactionCount: getCompactionCount(),
           assistantTexts,
           finalPromptText,
-          itemLifecycle: getItemLifecycle(),
+          itemLifecycle,
           toolMetas: toolMetasNormalized,
           didSendViaMessagingTool: didSendViaMessagingTool(),
           successfulCronAdds: getSuccessfulCronAdds(),
@@ -4689,8 +4735,44 @@ export async function runEmbeddedAttempt(
           lastToolError,
         }),
       );
+      log.info("agent turn completed", {
+        agentRunId: params.runId,
+        agentSessionId: params.sessionId,
+        sessionKeyHash: hashForTelemetry(params.sessionKey),
+        agentId: params.agentId,
+        provider: params.provider,
+        model: params.modelId,
+        thinkLevel: params.thinkLevel,
+        messageProvider: params.messageProvider ?? null,
+        channelId: buildAgentHookContextChannelFields(params).channelId ?? null,
+        status: attemptStatus,
+        durationMs: Date.now() - attemptStartedAt,
+        promptSubmitDelayMs: null,
+        modelToFirstToolMs: null,
+        firstMessageToolMs: null,
+        postMessageModelMs: null,
+        internalToolCallCount: attemptToolSummary.internalToolCallCount,
+        execToolCallCount: attemptToolSummary.execToolCallCount,
+        messageToolCallCount: attemptToolSummary.messageToolCallCount,
+        uniqueToolNames: attemptToolSummary.uniqueToolNames,
+        itemStartedCount: itemLifecycle.startedCount,
+        itemCompletedCount: itemLifecycle.completedCount,
+        itemActiveCount: itemLifecycle.activeCount,
+        didSendViaMessagingTool: didSendViaMessagingTool(),
+        inputTokens: attemptUsage?.input ?? null,
+        outputTokens: attemptUsage?.output ?? null,
+        cacheReadTokens: attemptUsage?.cacheRead ?? null,
+        totalTokens: attemptUsage?.total ?? null,
+        assistantTextCount: assistantTexts.length,
+        assistantTextChars,
+        finalPromptChars,
+        compactionCount: getCompactionCount(),
+        lastToolErrorTool: getLastToolError?.()?.toolName ?? null,
+        finalPromptPreview: elideTelemetryText(finalPromptText),
+        toolSummary: attemptToolSummary.toolSummary,
+      });
       trajectoryRecorder?.recordEvent("session.ended", {
-        status: attemptTrajectoryTerminal.status,
+        status: attemptStatus,
         aborted,
         externalAbort,
         timedOut,
