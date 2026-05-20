@@ -107,6 +107,12 @@ type GringoIdentityPreloadResult = {
   durationMs: number;
   bodyForAgentPrefix?: string;
   contextLength?: number;
+  accessTier?: string;
+  accessModel?: string;
+  accessHasAccess?: boolean;
+  accessDmEnabled?: boolean;
+  accessIsAdmin?: boolean;
+  accessCadence?: string;
   coachingContextLoaded?: boolean;
   coachingContextChars?: number;
   coachingContextVersion?: string;
@@ -114,6 +120,16 @@ type GringoIdentityPreloadResult = {
   userProfileContextChars?: number;
   trustedContextChars?: number;
   openClawSessionKeyForwarded?: boolean;
+  quotaAllowed?: boolean;
+  quotaLimit?: number;
+  quotaUsed?: number;
+  quotaRemaining?: number;
+  quotaMonthKey?: string;
+  quotaAccessTier?: string;
+  quotaBlockedReason?: string;
+  quotaCheckDurationMs?: number;
+  quotaUsageId?: string;
+  quotaSource?: "context" | "quota_only";
   error?: string;
 };
 
@@ -228,15 +244,50 @@ function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function resolveGringoAccessTier(access: Record<string, unknown> | undefined): string | undefined {
+  if (!access) return undefined;
+  if (readBoolean(access.isAdmin) === true) return "admin";
+
+  const hasAccess = readBoolean(access.hasAccess);
+  const accessModel = readString(access.accessModel);
+  const label = readString(access.label)?.toLowerCase() ?? "";
+
+  if (hasAccess === true) {
+    if (accessModel === "subscription") return "paid_subscription";
+    if (accessModel === "access") return "paid_access";
+    return "paid";
+  }
+
+  if (hasAccess === false || label.includes("free tier")) {
+    return "free";
+  }
+
+  return undefined;
+}
+
 function parseGringoCoachContextOutput(output: string): {
   prompt: string;
   workingContext?: string;
+  accessTier?: string;
+  accessModel?: string;
+  accessHasAccess?: boolean;
+  accessDmEnabled?: boolean;
+  accessIsAdmin?: boolean;
+  accessCadence?: string;
   coachingContextLoaded?: boolean;
   coachingContextChars?: number;
   coachingContextVersion?: string;
   userProfileContextLoaded?: boolean;
   userProfileContextChars?: number;
   trustedContextChars?: number;
+  quotaAllowed?: boolean;
+  quotaLimit?: number;
+  quotaUsed?: number;
+  quotaRemaining?: number;
+  quotaMonthKey?: string;
+  quotaAccessTier?: string;
+  quotaBlockedReason?: string;
+  quotaUsageId?: string;
 } | null {
   try {
     const envelope = JSON.parse(output) as unknown;
@@ -248,21 +299,126 @@ function parseGringoCoachContextOutput(output: string): {
     if (!prompt) {
       return null;
     }
+    const access = readObject(data.access);
+    const quota = readObject(data.quota);
     const coachingState = readObject(data.coachingState);
     const userProfile = readObject(data.userProfile);
     return {
       prompt,
       workingContext: readString(data.workingContext),
+      accessTier: resolveGringoAccessTier(access),
+      accessModel: readString(access?.accessModel),
+      accessHasAccess: readBoolean(access?.hasAccess),
+      accessDmEnabled: readBoolean(access?.dmEnabled),
+      accessIsAdmin: readBoolean(access?.isAdmin),
+      accessCadence: readString(access?.cadence),
       coachingContextLoaded: readBoolean(coachingState?.loaded),
       coachingContextChars: readNumber(coachingState?.included),
       coachingContextVersion: readString(coachingState?.updatedAt),
       userProfileContextLoaded: readBoolean(userProfile?.loaded),
       userProfileContextChars: readNumber(userProfile?.included),
       trustedContextChars: prompt.length,
+      quotaAllowed: readBoolean(quota?.allowed),
+      quotaLimit: readNumber(quota?.limit),
+      quotaUsed: readNumber(quota?.used),
+      quotaRemaining: readNumber(quota?.remaining),
+      quotaMonthKey: readString(quota?.monthKey),
+      quotaAccessTier: readString(quota?.accessTier),
+      quotaBlockedReason: readString(quota?.blockedReason),
+      quotaUsageId: readString(quota?.usageId),
     };
   } catch {
     return null;
   }
+}
+
+function parseGringoCoachQuotaOutput(output: string): {
+  allowed?: boolean;
+  limit?: number;
+  used?: number;
+  remaining?: number;
+  monthKey?: string;
+  accessTier?: string;
+  blockedReason?: string;
+  usageId?: string;
+} | null {
+  try {
+    const envelope = JSON.parse(output) as unknown;
+    const data = readObject(readObject(envelope)?.data) ?? readObject(envelope);
+    if (!data) {
+      return null;
+    }
+    return {
+      allowed: readBoolean(data.allowed),
+      limit: readNumber(data.limit),
+      used: readNumber(data.used),
+      remaining: readNumber(data.remaining),
+      monthKey: readString(data.monthKey),
+      accessTier: readString(data.accessTier),
+      blockedReason: readString(data.blockedReason),
+      usageId: readString(data.usageId),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function runGringoQuotaCheck(params: {
+  env: NodeJS.ProcessEnv;
+  ngrBin: string;
+  phone: string;
+  timeoutMs: number;
+  cwd?: string;
+}): Promise<{
+  status: "success" | "timeout" | "error";
+  durationMs: number;
+  quota?: ReturnType<typeof parseGringoCoachQuotaOutput>;
+  error?: string;
+}> {
+  const startedAt = Date.now();
+  return new Promise((resolve) => {
+    const execOptions: ExecFileOptions = {
+      encoding: "utf8",
+      env: params.env,
+      maxBuffer: 64 * 1024,
+      timeout: params.timeoutMs,
+    };
+    if (params.cwd) {
+      execOptions.cwd = params.cwd;
+    }
+
+    execFile(
+      params.ngrBin,
+      ["coach", "quota", "--phone", params.phone, "--format", "json"],
+      execOptions,
+      (error: ExecFileException | null, stdoutRaw: string | Buffer, stderrRaw: string | Buffer) => {
+        const durationMs = Date.now() - startedAt;
+        const output = stdoutRaw.toString().trim();
+        if (output) {
+          resolve({
+            status: "success",
+            durationMs,
+            quota: parseGringoCoachQuotaOutput(output),
+          });
+          return;
+        }
+        const message = error ? formatError(error) : stderrRaw.toString().trim();
+        resolve({
+          status: isProcessTimeoutError(error) ? "timeout" : "error",
+          durationMs,
+          error: elide(message || "quota check returned no output", 240),
+        });
+      },
+    );
+  });
+}
+
+function formatGringoQuotaUpsellMessage(params: { limit?: number; monthKey?: string }): string {
+  const limit = params.limit && params.limit > 0 ? params.limit : 10;
+  return [
+    `Você chegou ao limite gratuito de ${limit} mensagens do Gringo este mês.`,
+    "Para continuar conversando agora, assine a Na Gringa: https://nagringa.dev/assine",
+  ].join("\n\n");
 }
 
 async function preloadGringoIdentityContext(params: {
@@ -296,24 +452,6 @@ async function preloadGringoIdentityContext(params: {
     };
   }
 
-  const sessionCacheKey =
-    params.sessionKey && process.env.OPENCLAW_GRINGO_IDENTITY_PRELOAD_EVERY_TURN !== "1"
-      ? `${params.agentId}:${params.sessionKey}`
-      : undefined;
-  const cachedHint =
-    sessionCacheKey && !shouldForceGringoIdentityPreload(params.refreshText ?? params.inboundText)
-      ? getCachedGringoIdentityWorkingContext(sessionCacheKey)
-      : undefined;
-  if (sessionCacheKey && cachedHint) {
-    return {
-      status: "cached",
-      durationMs: Date.now() - startedAt,
-      bodyForAgentPrefix: cachedHint,
-      contextLength: cachedHint.length,
-      openClawSessionKeyForwarded: true,
-    };
-  }
-
   const phone = params.phone;
   const timeoutMs = resolveGringoIdentityPreloadTimeoutMs();
   const ngrBin = resolveGringoNgrBin();
@@ -342,8 +480,44 @@ async function preloadGringoIdentityContext(params: {
     env.OPENCLAW_CALLER_ACCOUNT_ID = params.accountId;
   }
 
+  const sessionCacheKey =
+    params.sessionKey && process.env.OPENCLAW_GRINGO_IDENTITY_PRELOAD_EVERY_TURN !== "1"
+      ? `${params.agentId}:${params.sessionKey}`
+      : undefined;
+  const cachedHint =
+    sessionCacheKey && !shouldForceGringoIdentityPreload(params.refreshText ?? params.inboundText)
+      ? getCachedGringoIdentityWorkingContext(sessionCacheKey)
+      : undefined;
+  const cwd = resolveGringoWorkspaceCwd();
+  if (sessionCacheKey && cachedHint) {
+    const quotaCheck = await runGringoQuotaCheck({
+      env,
+      ngrBin,
+      phone,
+      timeoutMs,
+      cwd,
+    });
+    return {
+      status: "cached",
+      durationMs: Date.now() - startedAt,
+      bodyForAgentPrefix: cachedHint,
+      contextLength: cachedHint.length,
+      openClawSessionKeyForwarded: true,
+      quotaAllowed: quotaCheck.quota?.allowed,
+      quotaLimit: quotaCheck.quota?.limit,
+      quotaUsed: quotaCheck.quota?.used,
+      quotaRemaining: quotaCheck.quota?.remaining,
+      quotaMonthKey: quotaCheck.quota?.monthKey,
+      quotaAccessTier: quotaCheck.quota?.accessTier,
+      quotaBlockedReason: quotaCheck.quota?.blockedReason,
+      quotaUsageId: quotaCheck.quota?.usageId,
+      quotaCheckDurationMs: quotaCheck.durationMs,
+      quotaSource: "quota_only",
+      error: quotaCheck.status === "success" ? undefined : quotaCheck.error,
+    };
+  }
+
   return new Promise((resolve) => {
-    const cwd = resolveGringoWorkspaceCwd();
     const execOptions: ExecFileOptions = {
       encoding: "utf8",
       env,
@@ -388,6 +562,12 @@ async function preloadGringoIdentityContext(params: {
             durationMs,
             bodyForAgentPrefix: promptForAgent,
             contextLength: promptForAgent.length,
+            accessTier: parsedContext?.accessTier,
+            accessModel: parsedContext?.accessModel,
+            accessHasAccess: parsedContext?.accessHasAccess,
+            accessDmEnabled: parsedContext?.accessDmEnabled,
+            accessIsAdmin: parsedContext?.accessIsAdmin,
+            accessCadence: parsedContext?.accessCadence,
             coachingContextLoaded: parsedContext?.coachingContextLoaded,
             coachingContextChars: parsedContext?.coachingContextChars,
             coachingContextVersion: parsedContext?.coachingContextVersion,
@@ -395,6 +575,16 @@ async function preloadGringoIdentityContext(params: {
             userProfileContextChars: parsedContext?.userProfileContextChars,
             trustedContextChars: parsedContext?.trustedContextChars,
             openClawSessionKeyForwarded: !!params.sessionKey,
+            quotaAllowed: parsedContext?.quotaAllowed,
+            quotaLimit: parsedContext?.quotaLimit,
+            quotaUsed: parsedContext?.quotaUsed,
+            quotaRemaining: parsedContext?.quotaRemaining,
+            quotaMonthKey: parsedContext?.quotaMonthKey,
+            quotaAccessTier: parsedContext?.quotaAccessTier,
+            quotaBlockedReason: parsedContext?.quotaBlockedReason,
+            quotaUsageId: parsedContext?.quotaUsageId,
+            quotaCheckDurationMs: undefined,
+            quotaSource: "context",
           });
           return;
         }
@@ -745,6 +935,12 @@ export async function processMessage(params: {
         identityPreloadStatus: identityPreload.status,
         identityPreloadDurationMs: identityPreload.durationMs,
         identityPreloadContextLength: identityPreload.contextLength ?? null,
+        gringoAccessTier: identityPreload.accessTier ?? null,
+        gringoAccessModel: identityPreload.accessModel ?? null,
+        gringoAccessHasAccess: identityPreload.accessHasAccess ?? null,
+        gringoAccessDmEnabled: identityPreload.accessDmEnabled ?? null,
+        gringoAccessIsAdmin: identityPreload.accessIsAdmin ?? null,
+        gringoAccessCadence: identityPreload.accessCadence ?? null,
         coachingContextLoaded: identityPreload.coachingContextLoaded ?? null,
         coachingContextChars: identityPreload.coachingContextChars ?? null,
         coachingContextVersion: identityPreload.coachingContextVersion ?? null,
@@ -752,10 +948,83 @@ export async function processMessage(params: {
         userProfileContextChars: identityPreload.userProfileContextChars ?? null,
         trustedContextChars: identityPreload.trustedContextChars ?? null,
         openClawSessionKeyForwarded: identityPreload.openClawSessionKeyForwarded ?? null,
+        gringoQuotaAllowed: identityPreload.quotaAllowed ?? null,
+        gringoQuotaLimit: identityPreload.quotaLimit ?? null,
+        gringoQuotaUsed: identityPreload.quotaUsed ?? null,
+        gringoQuotaRemaining: identityPreload.quotaRemaining ?? null,
+        gringoQuotaMonthKey: identityPreload.quotaMonthKey ?? null,
+        gringoQuotaAccessTier: identityPreload.quotaAccessTier ?? null,
+        gringoQuotaBlockedReason: identityPreload.quotaBlockedReason ?? null,
+        gringoQuotaCheckDurationMs: identityPreload.quotaCheckDurationMs ?? null,
+        gringoQuotaUsageId: identityPreload.quotaUsageId ?? null,
+        gringoQuotaSource: identityPreload.quotaSource ?? null,
         identityPreloadError: identityPreload.error ?? null,
       },
       "gringo identity preload completed",
     );
+  }
+  if (
+    params.route.agentId === GRINGO_AGENT_ID &&
+    params.msg.chatType === "direct" &&
+    identityPreload.quotaAllowed === false
+  ) {
+    const upsellMessage = formatGringoQuotaUpsellMessage({
+      limit: identityPreload.quotaLimit,
+      monthKey: identityPreload.quotaMonthKey,
+    });
+    const delivery = await deliverWebReply({
+      replyResult: { text: upsellMessage },
+      msg: params.msg,
+      maxMediaBytes: params.maxMediaBytes,
+      textLimit: 4096,
+      replyLogger: params.replyLogger,
+      connectionId: params.connectionId,
+      skipLog: false,
+    });
+    if (delivery.providerAccepted) {
+      params.rememberSentText(upsellMessage, {
+        combinedBody,
+        combinedBodySessionKey: params.route.sessionKey,
+        logVerboseMessage: true,
+      });
+    }
+    params.replyLogger.info(
+      {
+        accountId: params.route.accountId ?? params.msg.accountId,
+        agentId: params.route.agentId,
+        correlationId,
+        chatType: params.msg.chatType,
+        gringoQuotaAllowed: false,
+        gringoQuotaLimit: identityPreload.quotaLimit ?? null,
+        gringoQuotaUsed: identityPreload.quotaUsed ?? null,
+        gringoQuotaRemaining: identityPreload.quotaRemaining ?? null,
+        gringoQuotaMonthKey: identityPreload.quotaMonthKey ?? null,
+        gringoQuotaBlockedReason: identityPreload.quotaBlockedReason ?? null,
+        providerAccepted: delivery.providerAccepted,
+      },
+      "gringo quota upsell sent",
+    );
+    removeAckReactionHandleAfterReply({
+      removeAfterReply: Boolean(
+        params.cfg.messages?.removeAckAfterReply && delivery.providerAccepted,
+      ),
+      ackReaction,
+      onError: (err) => {
+        logAckFailure({
+          log: logVerbose,
+          channel: "whatsapp",
+          target: `${params.msg.chatId ?? conversationId}/${params.msg.id ?? "unknown"}`,
+          error: err,
+        });
+      },
+    });
+    if (statusReactionController) {
+      void statusReactionController.setDone();
+    }
+    if (shouldClearGroupHistory) {
+      params.groupHistories.set(params.groupHistoryKey, []);
+    }
+    return delivery.providerAccepted;
   }
   const bodyForAgent = identityPreload.bodyForAgentPrefix
     ? `${identityPreload.bodyForAgentPrefix}\n\nUser message:\n${msgForAgent.body}`

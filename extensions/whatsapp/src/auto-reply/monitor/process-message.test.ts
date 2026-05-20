@@ -9,6 +9,7 @@ const {
   runMessageReceivedMock,
   shouldComputeCommandAuthorizedMock,
   trackBackgroundTaskMock,
+  deliverWebReplyMock,
   execFileMock,
 } = vi.hoisted(() => ({
   resolvePolicyMock: vi.fn(),
@@ -17,6 +18,11 @@ const {
   runMessageReceivedMock: vi.fn(async () => undefined),
   shouldComputeCommandAuthorizedMock: vi.fn(() => false),
   trackBackgroundTaskMock: vi.fn(),
+  deliverWebReplyMock: vi.fn(async () => ({
+    results: [],
+    receipt: { platformMessageIds: ["upsell-1"], parts: [] },
+    providerAccepted: true,
+  })),
   execFileMock: vi.fn(),
 }));
 
@@ -82,7 +88,7 @@ vi.mock("../../session.js", async (importOriginal) => {
 
 vi.mock("../deliver-reply.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../deliver-reply.js")>();
-  return { ...actual, deliverWebReply: async () => {} };
+  return { ...actual, deliverWebReply: deliverWebReplyMock };
 });
 
 vi.mock("../loggers.js", async (importOriginal) => {
@@ -268,6 +274,7 @@ describe("processMessage group system prompt wiring", () => {
     shouldComputeCommandAuthorizedMock.mockReset();
     shouldComputeCommandAuthorizedMock.mockReturnValue(false);
     trackBackgroundTaskMock.mockClear();
+    deliverWebReplyMock.mockClear();
     execFileMock.mockReset();
     clearGringoIdentityPreloadSessionCacheForTests();
     delete process.env.OPENCLAW_GRINGO_IDENTITY_PRELOAD;
@@ -507,6 +514,22 @@ describe("processMessage group system prompt wiring", () => {
                 loaded: true,
                 included: 8,
               },
+              access: {
+                label: "paid yearly · DM: enabled",
+                hasAccess: true,
+                dmEnabled: true,
+                isAdmin: false,
+                accessModel: "subscription",
+                cadence: "yearly",
+              },
+              quota: {
+                allowed: true,
+                limit: 10,
+                used: 4,
+                remaining: 6,
+                monthKey: "2026-05",
+                accessTier: "paid_subscription",
+              },
             },
           }),
           "",
@@ -590,6 +613,12 @@ describe("processMessage group system prompt wiring", () => {
         agentId: "gringo",
         identityPreloadStatus: "success",
         identityPreloadContextLength: expect.any(Number),
+        gringoAccessTier: "paid_subscription",
+        gringoAccessModel: "subscription",
+        gringoAccessHasAccess: true,
+        gringoAccessDmEnabled: true,
+        gringoAccessIsAdmin: false,
+        gringoAccessCadence: "yearly",
         coachingContextLoaded: true,
         coachingContextChars: 19,
         coachingContextVersion: "2026-05-06T00:00:00Z",
@@ -597,6 +626,14 @@ describe("processMessage group system prompt wiring", () => {
         userProfileContextChars: 8,
         trustedContextChars: expect.any(Number),
         openClawSessionKeyForwarded: true,
+        gringoQuotaAllowed: true,
+        gringoQuotaLimit: 10,
+        gringoQuotaUsed: 4,
+        gringoQuotaRemaining: 6,
+        gringoQuotaMonthKey: "2026-05",
+        gringoQuotaAccessTier: "paid_subscription",
+        gringoQuotaCheckDurationMs: null,
+        gringoQuotaSource: "context",
       }),
       "gringo identity preload completed",
     );
@@ -645,6 +682,89 @@ describe("processMessage group system prompt wiring", () => {
         identityPreloadContextLength: expect.any(Number),
       }),
       "gringo identity preload completed",
+    );
+  });
+
+  it("sends the Gringo quota upsell without running the agent when free limit is reached", async () => {
+    const replyInfo = vi.fn();
+    resolvePolicyMock.mockReturnValue(makePolicy(makeAccount()));
+    execFileMock.mockImplementation(
+      (
+        _bin: string,
+        _args: string[],
+        _options: unknown,
+        callback: (error: null, stdout: string, stderr: string) => void,
+      ) => {
+        callback(
+          null,
+          JSON.stringify({
+            ok: true,
+            data: {
+              prompt:
+                "Trusted NaGringa coaching context\n\n# Alice - free\n\n- **Access:** free tier · DM: gated",
+              workingContext: "Trusted NaGringa working context\n- User: Alice · free",
+              access: {
+                label: "free tier · DM: gated",
+                hasAccess: false,
+                dmEnabled: false,
+                isAdmin: false,
+              },
+              quota: {
+                allowed: false,
+                limit: 10,
+                used: 10,
+                remaining: 0,
+                monthKey: "2026-05",
+                accessTier: "free",
+                blockedReason: "free_monthly_limit",
+              },
+            },
+          }),
+          "",
+        );
+      },
+    );
+
+    const sent = await callProcessMessage({
+      msg: {
+        ...baseMsg,
+        from: "+15550006666",
+        conversationId: "+15550006666",
+        chatId: "+15550006666",
+        chatType: "direct",
+        senderE164: "+15550006666",
+        senderJid: "15550006666@s.whatsapp.net",
+      },
+      route: {
+        ...baseRoute,
+        agentId: "gringo",
+        sessionKey: "agent:gringo:whatsapp:direct:+15550006666",
+        mainSessionKey: "agent:gringo:whatsapp:direct:+15550006666",
+      },
+      replyLogger: {
+        info: replyInfo,
+        warn: () => {},
+        error: () => {},
+        debug: () => {},
+      },
+    });
+
+    expect(sent).toBe(true);
+    expect(buildContextMock).not.toHaveBeenCalled();
+    expect(deliverWebReplyMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyResult: {
+          text: expect.stringContaining("limite gratuito de 10 mensagens"),
+        },
+      }),
+    );
+    expect(replyInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        gringoQuotaAllowed: false,
+        gringoQuotaBlockedReason: "free_monthly_limit",
+        providerAccepted: true,
+      }),
+      "gringo quota upsell sent",
     );
   });
 
@@ -700,7 +820,9 @@ describe("processMessage group system prompt wiring", () => {
     await callProcessMessage({ msg: directMsg, route: directRoute });
     await callProcessMessage({ msg: directMsg, route: directRoute });
 
-    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock).toHaveBeenCalledTimes(2);
+    expect(execFileMock.mock.calls[0]?.[1]).toContain("context");
+    expect(execFileMock.mock.calls[1]?.[1]).toContain("quota");
     expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain(
       "Trusted context for this turn is preloaded.",
     );
@@ -840,7 +962,8 @@ describe("processMessage group system prompt wiring", () => {
     vi.setSystemTime(new Date("2026-05-07T14:01:00Z"));
     await callProcessMessage({ msg: directMsg, route: directRoute });
 
-    expect(execFileMock).toHaveBeenCalledTimes(2);
+    expect(execFileMock).toHaveBeenCalledTimes(3);
+    expect(execFileMock.mock.calls[1]?.[1]).toContain("quota");
     expect(buildContextMock.mock.calls[1][0].bodyForAgent).toContain(
       "Trusted NaGringa working context",
     );
