@@ -47,6 +47,9 @@ export type CommitmentRecord = CommitmentScope & {
   dismissedAtMs?: number;
   snoozedUntilMs?: number;
   expiredAtMs?: number;
+  accessPausedAtMs?: number;
+  accessPausedLastCheckedAtMs?: number;
+  accessPausedReason?: string;
 };
 
 export type CommitmentStoreFile = {

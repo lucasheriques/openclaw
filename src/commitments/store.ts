@@ -116,6 +116,9 @@ function coerceCommitment(raw: unknown): CommitmentRecord | undefined {
   const dismissedAtMs = normalizeNonNegativeNumber(raw.dismissedAtMs);
   const snoozedUntilMs = normalizeNonNegativeNumber(raw.snoozedUntilMs);
   const expiredAtMs = normalizeNonNegativeNumber(raw.expiredAtMs);
+  const accessPausedAtMs = normalizeNonNegativeNumber(raw.accessPausedAtMs);
+  const accessPausedLastCheckedAtMs = normalizeNonNegativeNumber(raw.accessPausedLastCheckedAtMs);
+  const accessPausedReason = normalizeOptionalString(raw.accessPausedReason);
 
   if (
     !id ||
@@ -173,6 +176,9 @@ function coerceCommitment(raw: unknown): CommitmentRecord | undefined {
     ...(dismissedAtMs !== undefined ? { dismissedAtMs } : {}),
     ...(snoozedUntilMs !== undefined ? { snoozedUntilMs } : {}),
     ...(expiredAtMs !== undefined ? { expiredAtMs } : {}),
+    ...(accessPausedAtMs !== undefined ? { accessPausedAtMs } : {}),
+    ...(accessPausedLastCheckedAtMs !== undefined ? { accessPausedLastCheckedAtMs } : {}),
+    ...(accessPausedReason ? { accessPausedReason } : {}),
   };
 }
 
@@ -268,6 +274,18 @@ function isActiveStatus(status: CommitmentStatus): boolean {
   return status === "pending" || status === "snoozed";
 }
 
+function isAccessPaused(commitment: CommitmentRecord): boolean {
+  return commitment.accessPausedAtMs !== undefined;
+}
+
+function isWithinDeliveryWindow(
+  commitment: CommitmentRecord,
+  nowMs: number,
+  staleAfterMs: number,
+): boolean {
+  return commitment.dueWindow.latestMs + staleAfterMs >= nowMs || isAccessPaused(commitment);
+}
+
 function candidateToRecord(params: {
   item: CommitmentExtractionItem;
   candidate: CommitmentCandidate;
@@ -316,6 +334,7 @@ function expireStaleCommitmentsInStore(store: CommitmentStoreFile, nowMs: number
   store.commitments = store.commitments.map((commitment) => {
     if (
       !isActiveStatus(commitment.status) ||
+      isAccessPaused(commitment) ||
       commitment.dueWindow.latestMs + staleAfterMs >= nowMs
     ) {
       return commitment;
@@ -473,7 +492,7 @@ export async function listDueCommitmentsForSession(params: {
         commitment.sessionKey === params.sessionKey &&
         isActiveStatus(commitment.status) &&
         commitment.dueWindow.earliestMs <= nowMs &&
-        commitment.dueWindow.latestMs + staleAfterMs >= nowMs &&
+        isWithinDeliveryWindow(commitment, nowMs, staleAfterMs) &&
         (commitment.status !== "snoozed" || (commitment.snoozedUntilMs ?? 0) <= nowMs),
     )
     .toSorted(
@@ -501,7 +520,7 @@ export async function listDueCommitmentSessionKeys(params: {
       commitment.agentId === params.agentId &&
       isActiveStatus(commitment.status) &&
       commitment.dueWindow.earliestMs <= nowMs &&
-      commitment.dueWindow.latestMs + staleAfterMs >= nowMs &&
+      isWithinDeliveryWindow(commitment, nowMs, staleAfterMs) &&
       (commitment.status !== "snoozed" || (commitment.snoozedUntilMs ?? 0) <= nowMs) &&
       countSentCommitmentsForSession({
         store,
@@ -573,6 +592,41 @@ export async function markCommitmentsStatus(params: {
       ...(params.status === "sent" ? { sentAtMs: nowMs } : {}),
       ...(params.status === "dismissed" ? { dismissedAtMs: nowMs } : {}),
       ...(params.status === "expired" ? { expiredAtMs: nowMs } : {}),
+    };
+  });
+  if (changed) {
+    await saveCommitmentStore(undefined, store);
+  }
+}
+
+export async function markCommitmentsAccessPaused(params: {
+  cfg?: OpenClawConfig;
+  ids: string[];
+  reason: string;
+  nowMs?: number;
+  snoozeMs?: number;
+}): Promise<void> {
+  if (params.ids.length === 0) {
+    return;
+  }
+  const idSet = new Set(params.ids);
+  const nowMs = params.nowMs ?? Date.now();
+  const snoozedUntilMs = nowMs + Math.max(0, params.snoozeMs ?? 0);
+  const store = await loadCommitmentStore();
+  let changed = false;
+  store.commitments = store.commitments.map((commitment) => {
+    if (!idSet.has(commitment.id) || !isActiveStatus(commitment.status)) {
+      return commitment;
+    }
+    changed = true;
+    return {
+      ...commitment,
+      status: "snoozed",
+      snoozedUntilMs,
+      accessPausedAtMs: commitment.accessPausedAtMs ?? nowMs,
+      accessPausedLastCheckedAtMs: nowMs,
+      accessPausedReason: params.reason.trim() || "access_unavailable",
+      updatedAtMs: nowMs,
     };
   });
   if (changed) {

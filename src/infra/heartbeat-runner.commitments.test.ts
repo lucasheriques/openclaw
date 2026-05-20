@@ -539,4 +539,97 @@ tasks:
       sentAtMs: nowMs,
     });
   });
+
+  it("pauses Gringo WhatsApp commitments when proactive DM eligibility is inactive", async () => {
+    const { result, replySpy, sendWhatsApp, store } = await withTempHeartbeatSandbox(
+      async ({ tmpDir, storePath, replySpy }) => {
+        vi.stubEnv("OPENCLAW_STATE_DIR", tmpDir);
+        const ngrBin = path.join(tmpDir, "ngr-test");
+        await fs.writeFile(
+          ngrBin,
+          [
+            "#!/bin/sh",
+            'printf \'%s\\n\' \'{"eligible":false,"reason":"free_or_inactive","accessTier":"free","hasAccess":false}\'',
+          ].join("\n"),
+          "utf-8",
+        );
+        await fs.chmod(ngrBin, 0o755);
+        vi.stubEnv("GRINGO_NGR_BIN", ngrBin);
+
+        const sessionKey = "agent:gringo:whatsapp:user-5511964040404";
+        const cfg: OpenClawConfig = {
+          agents: {
+            defaults: {
+              workspace: tmpDir,
+              heartbeat: {
+                every: "5m",
+                target: "last",
+              },
+            },
+          },
+          channels: { whatsapp: { allowFrom: ["*"] } },
+          session: { store: storePath },
+          commitments: { enabled: true },
+        };
+        await seedSessionStore(storePath, sessionKey, {
+          lastChannel: "whatsapp",
+          lastProvider: "whatsapp",
+          lastTo: "stale-target@s.whatsapp.net",
+        });
+        await saveCommitmentStore(undefined, {
+          version: 1,
+          commitments: [
+            {
+              ...buildCommitment({
+                id: "cm_gringo_whatsapp",
+                sessionKey,
+                to: "5511964040404@s.whatsapp.net",
+              }),
+              agentId: "gringo",
+              channel: "whatsapp",
+              accountId: "primary",
+            },
+          ],
+        });
+
+        const sendWhatsApp = vi.fn().mockResolvedValue({
+          messageId: "m1",
+          toJid: "5511964040404@s.whatsapp.net",
+        });
+        replySpy.mockResolvedValue({ text: "How did the interview go?" });
+
+        const result = await runHeartbeatOnce({
+          cfg,
+          agentId: "gringo",
+          sessionKey,
+          deps: {
+            getReplyFromConfig: replySpy,
+            whatsapp: sendWhatsApp,
+            getQueueSize: () => 0,
+            nowMs: () => nowMs,
+          },
+        });
+
+        return {
+          result,
+          replySpy,
+          sendWhatsApp,
+          store: await loadCommitmentStore(),
+        };
+      },
+    );
+
+    expect(result).toEqual({ status: "skipped", reason: "gringo-access-ineligible" });
+    expect(replySpy).not.toHaveBeenCalled();
+    expect(sendWhatsApp).not.toHaveBeenCalled();
+    expect(store.commitments[0]).toMatchObject({
+      id: "cm_gringo_whatsapp",
+      status: "snoozed",
+      attempts: 0,
+      accessPausedAtMs: nowMs,
+      accessPausedLastCheckedAtMs: nowMs,
+      accessPausedReason: "free_or_inactive",
+    });
+    expect(store.commitments[0]?.snoozedUntilMs).toBe(nowMs + 24 * 60 * 60 * 1000);
+  });
 });

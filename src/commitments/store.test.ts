@@ -7,6 +7,7 @@ import {
   listDueCommitmentsForSession,
   listPendingCommitmentsForScope,
   loadCommitmentStore,
+  markCommitmentsAccessPaused,
   saveCommitmentStore,
 } from "./store.js";
 import type { CommitmentRecord } from "./types.js";
@@ -126,6 +127,47 @@ describe("commitment store delivery selection", () => {
     expect(store.commitments[0]?.status).toBe("expired");
     expect(store.commitments[0]?.expiredAtMs).toBe(nowMs);
     expect(store.commitments[0]?.updatedAtMs).toBe(nowMs);
+  });
+
+  it("keeps access-paused commitments due after the normal stale window", async () => {
+    await useTempStateDir();
+    await saveCommitmentStore(undefined, {
+      version: 1,
+      commitments: [
+        commitment({
+          dueWindow: {
+            earliestMs: nowMs - 5 * 24 * 60 * 60_000,
+            latestMs: nowMs - 4 * 24 * 60 * 60_000,
+            timezone: "America/Los_Angeles",
+          },
+        }),
+      ],
+    });
+
+    await markCommitmentsAccessPaused({
+      ids: ["cm_interview"],
+      reason: "free_or_inactive",
+      nowMs: nowMs - 4 * 24 * 60 * 60_000,
+      snoozeMs: 0,
+    });
+
+    const dueCommitments = await listDueCommitmentsForSession({
+      cfg: { commitments: { enabled: true } },
+      agentId: "main",
+      sessionKey,
+      nowMs,
+    });
+
+    expect(dueCommitments).toHaveLength(1);
+    expect(dueCommitments[0]?.id).toBe("cm_interview");
+    expect(dueCommitments[0]).toMatchObject({
+      status: "snoozed",
+      accessPausedReason: "free_or_inactive",
+    });
+
+    const store = await loadCommitmentStore();
+    expect(store.commitments[0]?.status).toBe("snoozed");
+    expect(store.commitments[0]?.expiredAtMs).toBeUndefined();
   });
 
   it("rewrites legacy source text fields when due commitments are listed", async () => {

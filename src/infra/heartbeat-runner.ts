@@ -1,3 +1,4 @@
+import { execFile, type ExecFileException, type ExecFileOptions } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -50,6 +51,7 @@ import { createReplyPrefixContext } from "../channels/reply-prefix.js";
 import {
   listDueCommitmentsForSession,
   listDueCommitmentSessionKeys,
+  markCommitmentsAccessPaused,
   markCommitmentsAttempted,
   markCommitmentsStatus,
 } from "../commitments/store.js";
@@ -151,6 +153,9 @@ export type HeartbeatDeps = OutboundSendDeps &
 const log = createSubsystemLogger("gateway/heartbeat");
 let heartbeatRunnerRuntimePromise: Promise<typeof import("./heartbeat-runner.runtime.js")> | null =
   null;
+const GRINGO_AGENT_ID = "gringo";
+const GRINGO_PROACTIVE_ELIGIBILITY_DEFAULT_TIMEOUT_MS = 2_500;
+const GRINGO_PROACTIVE_ACCESS_PAUSE_MS = 24 * 60 * 60 * 1000;
 
 function loadHeartbeatRunnerRuntime() {
   heartbeatRunnerRuntimePromise ??= import("./heartbeat-runner.runtime.js");
@@ -243,6 +248,128 @@ export { isCronSystemEvent };
 
 function canHeartbeatDeliverCommitments(heartbeat?: HeartbeatConfig): boolean {
   return (normalizeOptionalString(heartbeat?.target) ?? "none") !== "none";
+}
+
+type GringoProactiveEligibilityResult =
+  | { eligible: true; reason?: string }
+  | { eligible: false; reason: string };
+
+function resolveGringoNgrBin(): string {
+  return process.env.GRINGO_NGR_BIN?.trim() || process.env.NGR_BIN?.trim() || "ngr";
+}
+
+function resolveGringoProactiveEligibilityTimeoutMs(): number {
+  const raw = process.env.OPENCLAW_GRINGO_PROACTIVE_ELIGIBILITY_TIMEOUT_MS?.trim();
+  if (!raw) {
+    return GRINGO_PROACTIVE_ELIGIBILITY_DEFAULT_TIMEOUT_MS;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : GRINGO_PROACTIVE_ELIGIBILITY_DEFAULT_TIMEOUT_MS;
+}
+
+function readObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function parseGringoProactiveEligibilityOutput(
+  stdout: string,
+): GringoProactiveEligibilityResult | undefined {
+  const trimmed = stdout.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = JSON.parse(trimmed) as unknown;
+  const root = readObject(parsed);
+  const data = readObject(root?.data) ?? root;
+  if (!data || typeof data.eligible !== "boolean") {
+    return undefined;
+  }
+  return data.eligible
+    ? { eligible: true, reason: readString(data.reason) }
+    : { eligible: false, reason: readString(data.reason) ?? "ineligible" };
+}
+
+function runGringoProactiveEligibilityCheck(params: {
+  phone: string;
+}): Promise<GringoProactiveEligibilityResult> {
+  const timeoutMs = resolveGringoProactiveEligibilityTimeoutMs();
+  const options: ExecFileOptions = {
+    encoding: "utf8",
+    timeout: timeoutMs,
+    maxBuffer: 1024 * 1024,
+    env: process.env,
+  };
+  return new Promise((resolve) => {
+    execFile(
+      resolveGringoNgrBin(),
+      ["coach", "eligibility", "--phone", params.phone, "--format", "json"],
+      options,
+      (error: ExecFileException | null, stdoutRaw: string | Buffer, stderrRaw: string | Buffer) => {
+        const stdout = stdoutRaw.toString();
+        if (error) {
+          const reason = error.killed
+            ? "eligibility_check_timeout"
+            : stderrRaw.toString().trim() || error.message || "eligibility_check_failed";
+          resolve({ eligible: false, reason });
+          return;
+        }
+        try {
+          resolve(
+            parseGringoProactiveEligibilityOutput(stdout) ?? {
+              eligible: false,
+              reason: "eligibility_check_empty",
+            },
+          );
+        } catch (err) {
+          resolve({
+            eligible: false,
+            reason: err instanceof Error ? err.message : "eligibility_check_parse_failed",
+          });
+        }
+      },
+    );
+  });
+}
+
+async function ensureGringoProactiveCommitmentEligibility(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+  commitments: CommitmentRecord[];
+  delivery: { channel: string; to?: string };
+  nowMs: number;
+}): Promise<GringoProactiveEligibilityResult> {
+  if (
+    normalizeAgentId(params.agentId) !== GRINGO_AGENT_ID ||
+    params.commitments.length === 0 ||
+    params.delivery.channel !== "whatsapp"
+  ) {
+    return { eligible: true };
+  }
+  const phone =
+    params.commitments.find((commitment) => commitment.to?.trim())?.to?.trim() ??
+    params.delivery.to?.trim();
+  if (!phone) {
+    return { eligible: false, reason: "missing_whatsapp_target" };
+  }
+  const result = await runGringoProactiveEligibilityCheck({ phone });
+  if (!result.eligible) {
+    await markCommitmentsAccessPaused({
+      cfg: params.cfg,
+      ids: params.commitments.map((commitment) => commitment.id),
+      reason: result.reason,
+      nowMs: params.nowMs,
+      snoozeMs: GRINGO_PROACTIVE_ACCESS_PAUSE_MS,
+    });
+  }
+  return result;
 }
 
 type HeartbeatAgentState = {
@@ -1491,6 +1618,28 @@ export async function runHeartbeatOnce(opts: {
       consumeSelectedSystemEventEntries(sessionKey, inspectedSystemEventsToConsume);
     }
     return { status: "skipped", reason: "no-tasks-due" };
+  }
+
+  const gringoEligibility = await ensureGringoProactiveCommitmentEligibility({
+    cfg,
+    agentId,
+    commitments: preflight.dueCommitments,
+    delivery: {
+      channel: delivery.channel,
+      ...(delivery.to ? { to: delivery.to } : {}),
+    },
+    nowMs: startedAt,
+  });
+  if (!gringoEligibility.eligible) {
+    emitHeartbeatEvent({
+      status: "skipped",
+      reason: `gringo-access-${gringoEligibility.reason}`,
+      durationMs: Date.now() - startedAt,
+      channel: delivery.channel !== "none" ? delivery.channel : undefined,
+      accountId: delivery.accountId,
+      indicatorType: visibility.useIndicator ? resolveIndicatorType("skipped") : undefined,
+    });
+    return { status: "skipped", reason: "gringo-access-ineligible" };
   }
 
   let runSessionKey = sessionKey;
