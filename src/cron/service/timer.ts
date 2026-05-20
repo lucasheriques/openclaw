@@ -1,3 +1,4 @@
+import { execFile, type ExecFileException, type ExecFileOptions } from "node:child_process";
 import { resolveFailoverReasonFromError } from "../../agents/failover-error.js";
 import { formatEmbeddedAgentExecutionPhase } from "../../agents/pi-embedded-runner/execution-phase.js";
 import type { CronConfig, CronRetryOn } from "../../config/types.cron.js";
@@ -74,6 +75,10 @@ const DEFAULT_MAX_MISSED_JOBS_PER_RESTART = 5;
 const DEFAULT_STARTUP_DEFERRED_MISSED_AGENT_JOB_DELAY_MS = 2 * 60_000;
 const DEFAULT_FAILURE_ALERT_AFTER = 2;
 const DEFAULT_FAILURE_ALERT_COOLDOWN_MS = 60 * 60_000; // 1 hour
+const GRINGO_AGENT_ID = "gringo";
+const GRINGO_PROACTIVE_ACCESS_ERROR_PREFIX = "gringo-access-";
+const GRINGO_PROACTIVE_ELIGIBILITY_DEFAULT_TIMEOUT_MS = 2_500;
+const GRINGO_PROACTIVE_CRON_ACCESS_PAUSE_MS = 24 * 60 * 60 * 1000;
 
 type ResolvedFailureAlert = {
   after: number;
@@ -545,6 +550,156 @@ function resolveRetryConfig(cronConfig?: CronConfig) {
   };
 }
 
+type GringoProactiveEligibilityResult =
+  | { eligible: true; reason?: string }
+  | { eligible: false; reason: string };
+
+function resolveGringoNgrBin(): string {
+  return process.env.GRINGO_NGR_BIN?.trim() || process.env.NGR_BIN?.trim() || "ngr";
+}
+
+function resolveGringoProactiveEligibilityTimeoutMs(): number {
+  const raw = process.env.OPENCLAW_GRINGO_PROACTIVE_ELIGIBILITY_TIMEOUT_MS?.trim();
+  if (!raw) {
+    return GRINGO_PROACTIVE_ELIGIBILITY_DEFAULT_TIMEOUT_MS;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : GRINGO_PROACTIVE_ELIGIBILITY_DEFAULT_TIMEOUT_MS;
+}
+
+function readObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function parseGringoProactiveEligibilityOutput(
+  stdout: string,
+): GringoProactiveEligibilityResult | undefined {
+  const trimmed = stdout.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = JSON.parse(trimmed) as unknown;
+  const root = readObject(parsed);
+  const data = readObject(root?.data) ?? root;
+  if (!data || typeof data.eligible !== "boolean") {
+    return undefined;
+  }
+  return data.eligible
+    ? { eligible: true, reason: readString(data.reason) }
+    : { eligible: false, reason: readString(data.reason) ?? "ineligible" };
+}
+
+function runGringoProactiveEligibilityCheck(params: {
+  phone: string;
+}): Promise<GringoProactiveEligibilityResult> {
+  const timeoutMs = resolveGringoProactiveEligibilityTimeoutMs();
+  const options: ExecFileOptions = {
+    encoding: "utf8",
+    timeout: timeoutMs,
+    maxBuffer: 1024 * 1024,
+    env: process.env,
+  };
+  return new Promise((resolve) => {
+    execFile(
+      resolveGringoNgrBin(),
+      ["coach", "eligibility", "--phone", params.phone, "--format", "json"],
+      options,
+      (error: ExecFileException | null, stdoutRaw: string | Buffer, stderrRaw: string | Buffer) => {
+        const stdout = stdoutRaw.toString();
+        if (error) {
+          const reason = error.killed
+            ? "eligibility_check_timeout"
+            : stderrRaw.toString().trim() || error.message || "eligibility_check_failed";
+          resolve({ eligible: false, reason });
+          return;
+        }
+        try {
+          resolve(
+            parseGringoProactiveEligibilityOutput(stdout) ?? {
+              eligible: false,
+              reason: "eligibility_check_empty",
+            },
+          );
+        } catch (err) {
+          resolve({
+            eligible: false,
+            reason: err instanceof Error ? err.message : "eligibility_check_parse_failed",
+          });
+        }
+      },
+    );
+  });
+}
+
+function normalizeGringoAccessReason(reason: string | undefined): string {
+  const normalized = (reason ?? "access_unavailable").trim().replace(/[^a-zA-Z0-9_.:-]+/g, "_");
+  return normalized || "access_unavailable";
+}
+
+function resolvePhoneFromGringoWhatsappSessionKey(
+  sessionKey: string | undefined,
+): string | undefined {
+  const prefix = "agent:gringo:whatsapp:";
+  if (!sessionKey?.startsWith(prefix)) {
+    return undefined;
+  }
+  const parts = sessionKey.split(":");
+  return parts.length >= 5 ? parts.slice(4).join(":").trim() || undefined : undefined;
+}
+
+function resolveGringoProactiveCronPhone(job: CronJob): string | undefined {
+  const deliveryPlan = resolveCronDeliveryPlan(job);
+  const channel = normalizeOptionalLowercaseString(job.delivery?.channel ?? deliveryPlan.channel);
+  if (channel && channel !== "whatsapp") {
+    return undefined;
+  }
+  const explicitTo = job.delivery?.to?.trim() || deliveryPlan.to?.trim();
+  return explicitTo || resolvePhoneFromGringoWhatsappSessionKey(job.sessionKey);
+}
+
+function isGringoProactiveAccessSkip(error: string | undefined): boolean {
+  return typeof error === "string" && error.startsWith(GRINGO_PROACTIVE_ACCESS_ERROR_PREFIX);
+}
+
+async function maybeSkipGringoProactiveCronByAccess(params: {
+  state: CronServiceState;
+  job: CronJob;
+}): Promise<CronRunOutcome | undefined> {
+  if (params.job.agentId !== GRINGO_AGENT_ID || params.job.payload.kind !== "agentTurn") {
+    return undefined;
+  }
+  const phone = resolveGringoProactiveCronPhone(params.job);
+  if (!phone) {
+    return undefined;
+  }
+  const eligibility = await runGringoProactiveEligibilityCheck({ phone });
+  if (eligibility.eligible) {
+    return undefined;
+  }
+  const reason = normalizeGringoAccessReason(eligibility.reason);
+  const error = `${GRINGO_PROACTIVE_ACCESS_ERROR_PREFIX}${reason}`;
+  params.state.deps.log.info(
+    { jobId: params.job.id, jobName: params.job.name, reason },
+    "cron: pausing Gringo proactive job until access is eligible",
+  );
+  return {
+    status: "skipped",
+    error,
+    diagnostics: createCronRunDiagnosticsFromError("cron-preflight", error, {
+      severity: "warn",
+      nowMs: params.state.deps.nowMs,
+    }),
+  };
+}
+
 function resolveDeliveryState(params: {
   job: CronJob;
   runStatus: CronRunStatus;
@@ -893,7 +1048,21 @@ export function applyJobResult(
 
   if (!shouldDelete) {
     if (job.schedule.kind === "at") {
-      if (result.status === "ok" || result.status === "skipped") {
+      if (result.status === "skipped" && isGringoProactiveAccessSkip(result.error)) {
+        const pauseMs = GRINGO_PROACTIVE_CRON_ACCESS_PAUSE_MS;
+        job.enabled = true;
+        job.state.nextRunAtMs = result.endedAt + pauseMs;
+        state.deps.log.info(
+          {
+            jobId: job.id,
+            jobName: job.name,
+            nextRunAtMs: job.state.nextRunAtMs,
+            pauseMs,
+            reason: result.error,
+          },
+          "cron: rescheduled Gringo proactive one-shot after access skip",
+        );
+      } else if (result.status === "ok" || result.status === "skipped") {
         // One-shot done or skipped: disable to prevent tight-loop (#11452).
         job.enabled = false;
         job.state.nextRunAtMs = undefined;
@@ -1194,7 +1363,9 @@ export async function onTimer(state: CronServiceState) {
       const taskRunId = tryCreateCronTaskRun({ state, job, startedAt });
 
       try {
-        const result = await executeJobCoreWithTimeout(state, job);
+        const result =
+          (await maybeSkipGringoProactiveCronByAccess({ state, job })) ??
+          (await executeJobCoreWithTimeout(state, job));
         return {
           jobId: id,
           job,

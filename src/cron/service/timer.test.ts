@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setupCronServiceSuite, writeCronStoreSnapshot } from "../../cron/service.test-harness.js";
 import { createCronServiceState } from "../../cron/service/state.js";
@@ -30,9 +31,71 @@ function createDueMainJob(params: { now: number; wakeMode: CronJob["wakeMode"] }
 
 afterEach(() => {
   resetTaskRegistryForTests();
+  vi.unstubAllEnvs();
 });
 
 describe("cron service timer seam coverage", () => {
+  it("pauses Gringo WhatsApp one-shot cron jobs without running the agent when access is inactive", async () => {
+    const { storePath } = await makeStorePath();
+    const now = Date.parse("2026-05-20T23:15:00.000Z");
+    const ngrBin = `${storePath}.ngr-test`;
+    await fs.mkdir(path.dirname(ngrBin), { recursive: true });
+    await fs.writeFile(
+      ngrBin,
+      [
+        "#!/bin/sh",
+        'printf \'%s\\n\' \'{"eligible":false,"reason":"free_or_inactive","hasAccess":false}\'',
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.chmod(ngrBin, 0o755);
+    vi.stubEnv("GRINGO_NGR_BIN", ngrBin);
+
+    const runIsolatedAgentJob = vi.fn(async () => ({ status: "ok" as const }));
+    await writeCronStoreSnapshot({
+      storePath,
+      jobs: [
+        {
+          id: "gringo-interview-reminder",
+          name: "gringo interview reminder",
+          agentId: "gringo",
+          enabled: true,
+          createdAtMs: now - 60_000,
+          updatedAtMs: now - 60_000,
+          schedule: { kind: "at", at: new Date(now - 1_000).toISOString() },
+          sessionTarget: "isolated",
+          wakeMode: "now",
+          payload: { kind: "agentTurn", message: "Remind Lucas to prep for the interview." },
+          sessionKey: "agent:gringo:whatsapp:direct:+5511999999999",
+          delivery: { mode: "announce", channel: "whatsapp", to: "+5511999999999" },
+          deleteAfterRun: true,
+          state: { nextRunAtMs: now - 1_000 },
+        },
+      ],
+    });
+
+    const state = createCronServiceState({
+      storePath,
+      cronEnabled: true,
+      log: logger,
+      nowMs: () => now,
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeat: vi.fn(),
+      runIsolatedAgentJob,
+    });
+
+    await onTimer(state);
+
+    expect(runIsolatedAgentJob).not.toHaveBeenCalled();
+    const persisted = await loadCronStore(storePath);
+    const job = persisted.jobs[0];
+    expect(job?.enabled).toBe(true);
+    expect(job?.state.lastStatus).toBe("skipped");
+    expect(job?.state.lastError).toBe("gringo-access-free_or_inactive");
+    expect(job?.state.nextRunAtMs).toBe(now + 24 * 60 * 60_000);
+    expect(job?.state.runningAtMs).toBeUndefined();
+  });
+
   it("persists the next schedule and hands off next-heartbeat main jobs", async () => {
     const { storePath } = await makeStorePath();
     const now = Date.parse("2026-03-23T12:00:00.000Z");
