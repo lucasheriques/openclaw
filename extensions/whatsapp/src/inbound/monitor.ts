@@ -766,6 +766,17 @@ export async function attachWebInboxToSocket(
         logWhatsAppVerbose(options.verbose, `Presence update failed: ${String(err)}`);
       }
     };
+    const stopComposing = async () => {
+      const currentSock = getCurrentSock();
+      if (!currentSock) {
+        return;
+      }
+      try {
+        await currentSock.sendPresenceUpdate("paused", chatJid);
+      } catch (err) {
+        logWhatsAppVerbose(options.verbose, `Presence update failed: ${String(err)}`);
+      }
+    };
     const reply = async (text: string, options?: MiscMessageGenerationOptions) => {
       const resolved = await resolveOutboundMentionsForGroup(chatJid, text);
       const result = await sendTrackedMessage(
@@ -850,6 +861,7 @@ export async function attachWebInboxToSocket(
           ]
         : undefined,
       sendComposing,
+      stopComposing,
       reply,
       sendMedia,
       mediaPath: enriched.mediaPath,

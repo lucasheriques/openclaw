@@ -707,6 +707,9 @@ export async function dispatchWhatsAppBufferedReply(params: {
         await deliverNormalizedPayload(normalizedDeliveryPayload, info);
       },
       onReplyStart: params.msg.sendComposing,
+      onCleanup: () => {
+        void params.msg.stopComposing?.();
+      },
       ...(statusReactionController
         ? {
             onCompactionStart: async () => {

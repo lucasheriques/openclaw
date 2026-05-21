@@ -149,6 +149,7 @@ describe("web monitor inbox", () => {
     const onMessage = vi.fn(async (msg) => {
       await msg.sendComposing();
       await msg.reply("pong");
+      await msg.stopComposing?.();
     });
 
     const { listener, sock } = await startInboxMonitor(onMessage as InboxOnMessage);
@@ -179,6 +180,7 @@ describe("web monitor inbox", () => {
     ]);
     expect(sock.sendPresenceUpdate).toHaveBeenCalledWith("available");
     expect(sock.sendPresenceUpdate).toHaveBeenCalledWith("composing", "999@s.whatsapp.net");
+    expect(sock.sendPresenceUpdate).toHaveBeenCalledWith("paused", "999@s.whatsapp.net");
     expect(sock.sendMessage).toHaveBeenCalledWith("999@s.whatsapp.net", {
       text: "pong",
     });
@@ -349,6 +351,7 @@ describe("web monitor inbox", () => {
       reply: (text: string) => Promise<void>;
       sendMedia: (payload: Record<string, unknown>) => Promise<void>;
       sendComposing: () => Promise<void>;
+      stopComposing: () => Promise<void>;
     };
 
     const replacementSock = {
@@ -362,6 +365,7 @@ describe("web monitor inbox", () => {
     await inbound.reply("pong");
     await inbound.sendMedia({ text: "after-reconnect" });
     await inbound.sendComposing();
+    await inbound.stopComposing();
 
     expect(replacementSock.sendMessage).toHaveBeenNthCalledWith(1, "999@s.whatsapp.net", {
       text: "pong",
@@ -373,6 +377,7 @@ describe("web monitor inbox", () => {
       "composing",
       "999@s.whatsapp.net",
     );
+    expect(replacementSock.sendPresenceUpdate).toHaveBeenCalledWith("paused", "999@s.whatsapp.net");
     expect(sock.sendMessage).not.toHaveBeenCalled();
 
     await listener.close();

@@ -87,6 +87,7 @@ export type WebInboundMessage = {
   fromMe?: boolean;
   location?: NormalizedLocation;
   sendComposing: () => Promise<void>;
+  stopComposing?: () => Promise<void>;
   reply: (text: string, options?: MiscMessageGenerationOptions) => Promise<WhatsAppSendResult>;
   sendMedia: (
     payload: AnyMessageContent,

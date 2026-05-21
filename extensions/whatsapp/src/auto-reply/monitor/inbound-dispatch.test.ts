@@ -1140,20 +1140,27 @@ describe("whatsapp inbound dispatch", () => {
     expectRememberSentContextFields(rememberSentText, undefined, {});
   });
 
-  it("passes sendComposing through as the reply typing callback", async () => {
+  it("passes WhatsApp presence callbacks through the reply typing lifecycle", async () => {
     const sendComposing = vi.fn(async () => undefined);
+    const stopComposing = vi.fn(async () => undefined);
 
     await dispatchBufferedReply({
-      msg: makeMsg({ sendComposing }),
+      msg: makeMsg({ sendComposing, stopComposing }),
     });
 
-    expect(
-      (
-        capturedDispatchParams as {
-          dispatcherOptions?: { onReplyStart?: unknown };
-        }
-      )?.dispatcherOptions?.onReplyStart,
-    ).toBe(sendComposing);
+    const dispatcherOptions = (
+      capturedDispatchParams as {
+        dispatcherOptions?: {
+          onReplyStart?: unknown;
+          onCleanup?: () => void;
+        };
+      }
+    )?.dispatcherOptions;
+
+    expect(dispatcherOptions?.onReplyStart).toBe(sendComposing);
+    dispatcherOptions?.onCleanup?.();
+    await Promise.resolve();
+    expect(stopComposing).toHaveBeenCalledTimes(1);
   });
 
   it("logs delivery failures from the shared dispatcher with WhatsApp context", async () => {
