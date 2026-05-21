@@ -198,4 +198,27 @@ describe("buildReplyPromptEnvelope", () => {
     expect(envelope.transcriptCommandBody).toBe("re-read persona files");
     expect(envelope.transcriptCommandBody).not.toContain("Startup context");
   });
+
+  it("adds trusted context to the model prompt without adding it to transcript body", () => {
+    const sessionCtx = finalizeInboundContext({
+      Body: "hello",
+      BodyForAgent: "hello",
+      TrustedContext: ["Trusted Gringo card"],
+    });
+
+    const envelope = buildReplyPromptEnvelope({
+      ctx: sessionCtx,
+      sessionCtx,
+      baseBody: "hello",
+      hasUserBody: true,
+      inboundUserContext: "",
+      isBareSessionReset: false,
+      startupAction: "new",
+    });
+
+    expect(envelope.prefixedCommandBody).toContain("Trusted context");
+    expect(envelope.prefixedCommandBody).toContain("Trusted Gringo card");
+    expect(envelope.transcriptCommandBody).toBe("hello");
+    expect(envelope.transcriptCommandBody).not.toContain("Trusted Gringo card");
+  });
 });

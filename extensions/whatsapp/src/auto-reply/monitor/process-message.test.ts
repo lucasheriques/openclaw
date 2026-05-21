@@ -260,6 +260,13 @@ function mockCallArg(mockFn: ReturnType<typeof vi.fn>, label: string, callIndex 
   return call[argIndex];
 }
 
+function trustedContextAt(callIndex: number): string {
+  const params = mockCallArg(buildContextMock, "buildWhatsAppInboundContext", callIndex) as {
+    trustedContext?: string[];
+  };
+  return params.trustedContext?.join("\n") ?? "";
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -600,14 +607,11 @@ describe("processMessage group system prompt wiring", () => {
       }),
       expect.any(Function),
     );
-    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain(
-      "Trusted context for this turn is preloaded.",
-    );
-    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain(
-      "Trusted NaGringa coaching context",
-    );
-    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain("Active loop: Nubank");
-    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain("User message:\nhi");
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toBe("hi");
+    expect(trustedContextAt(0)).toContain("Trusted context for this turn is preloaded.");
+    expect(trustedContextAt(0)).toContain("Trusted NaGringa coaching context");
+    expect(trustedContextAt(0)).toContain("Active loop: Nubank");
+    expect(trustedContextAt(0)).not.toContain("User message:\nhi");
     expect(replyInfo).toHaveBeenCalledWith(
       expect.objectContaining({
         agentId: "gringo",
@@ -664,16 +668,13 @@ describe("processMessage group system prompt wiring", () => {
     });
 
     expect(execFileMock).not.toHaveBeenCalled();
-    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain(
-      "Trusted WhatsApp group sender: +15550002222",
-    );
-    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain(
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toBe("hi");
+    expect(trustedContextAt(0)).toContain("Trusted WhatsApp group sender: +15550002222");
+    expect(trustedContextAt(0)).toContain(
       "ngr coach context --phone <trusted_phone> --surface group",
     );
-    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain("User message:\nhi");
-    expect(buildContextMock.mock.calls[0][0].bodyForAgent).not.toContain(
-      "Trusted NaGringa coaching context",
-    );
+    expect(trustedContextAt(0)).not.toContain("User message:\nhi");
+    expect(trustedContextAt(0)).not.toContain("Trusted NaGringa coaching context");
     expect(replyInfo).toHaveBeenCalledWith(
       expect.objectContaining({
         agentId: "gringo",
@@ -823,23 +824,15 @@ describe("processMessage group system prompt wiring", () => {
     expect(execFileMock).toHaveBeenCalledTimes(2);
     expect(execFileMock.mock.calls[0]?.[1]).toContain("context");
     expect(execFileMock.mock.calls[1]?.[1]).toContain("quota");
-    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain(
-      "Trusted context for this turn is preloaded.",
-    );
-    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain(
-      "Trusted NaGringa coaching context",
-    );
-    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toContain("User message:\nhi");
-    expect(buildContextMock.mock.calls[1][0].bodyForAgent).not.toContain(
-      "Trusted NaGringa coaching context",
-    );
-    expect(buildContextMock.mock.calls[1][0].bodyForAgent).toContain(
-      "Trusted NaGringa working context",
-    );
-    expect(buildContextMock.mock.calls[1][0].bodyForAgent).toContain(
-      "Role: Senior Product Engineer",
-    );
-    expect(buildContextMock.mock.calls[1][0].bodyForAgent).toContain("User message:\nhi");
+    expect(buildContextMock.mock.calls[0][0].bodyForAgent).toBe("hi");
+    expect(trustedContextAt(0)).toContain("Trusted context for this turn is preloaded.");
+    expect(trustedContextAt(0)).toContain("Trusted NaGringa coaching context");
+    expect(trustedContextAt(0)).not.toContain("User message:\nhi");
+    expect(buildContextMock.mock.calls[1][0].bodyForAgent).toBe("hi");
+    expect(trustedContextAt(1)).not.toContain("Trusted NaGringa coaching context");
+    expect(trustedContextAt(1)).toContain("Trusted NaGringa working context");
+    expect(trustedContextAt(1)).toContain("Role: Senior Product Engineer");
+    expect(trustedContextAt(1)).not.toContain("User message:\nhi");
   });
 
   it("refreshes full Gringo identity context on direct turn when requested", async () => {
@@ -899,9 +892,8 @@ describe("processMessage group system prompt wiring", () => {
     });
 
     expect(execFileMock).toHaveBeenCalledTimes(2);
-    expect(buildContextMock.mock.calls[1][0].bodyForAgent).toContain(
-      "Trusted NaGringa coaching context",
-    );
+    expect(buildContextMock.mock.calls[1][0].bodyForAgent).toBe("atualiza meu contexto");
+    expect(trustedContextAt(1)).toContain("Trusted NaGringa coaching context");
   });
 
   it("expires cached Gringo identity context after two hours", async () => {
@@ -964,12 +956,10 @@ describe("processMessage group system prompt wiring", () => {
 
     expect(execFileMock).toHaveBeenCalledTimes(3);
     expect(execFileMock.mock.calls[1]?.[1]).toContain("quota");
-    expect(buildContextMock.mock.calls[1][0].bodyForAgent).toContain(
-      "Trusted NaGringa working context",
-    );
-    expect(buildContextMock.mock.calls[2][0].bodyForAgent).toContain(
-      "Trusted NaGringa coaching context",
-    );
+    expect(buildContextMock.mock.calls[1][0].bodyForAgent).toBe("hi");
+    expect(trustedContextAt(1)).toContain("Trusted NaGringa working context");
+    expect(buildContextMock.mock.calls[2][0].bodyForAgent).toBe("hi");
+    expect(trustedContextAt(2)).toContain("Trusted NaGringa coaching context");
   });
 
   it("tracks session metadata writes as connection background tasks", async () => {

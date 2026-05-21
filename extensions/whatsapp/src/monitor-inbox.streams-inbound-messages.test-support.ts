@@ -758,6 +758,65 @@ describe("web monitor inbox", () => {
     await listener.close();
   });
 
+  it("recovers group reply sender E.164 from cached quoted message metadata", async () => {
+    const onMessage = vi.fn(async () => {
+      return;
+    });
+
+    const { listener, sock } = await startInboxMonitor(onMessage as InboxOnMessage);
+    sock.signalRepository.lidMapping.getPNForLID.mockResolvedValueOnce("444:0@s.whatsapp.net");
+
+    const originalId = nextMessageId("group-original");
+    sock.ev.emit(
+      "messages.upsert",
+      buildNotifyMessageUpsert({
+        id: originalId,
+        remoteJid: "123@g.us",
+        participant: "444@lid",
+        text: "original helpful message",
+        timestamp: 1_700_000_000,
+      }),
+    );
+    await waitForMessageCalls(onMessage, 1);
+
+    sock.ev.emit("messages.upsert", {
+      type: "notify",
+      messages: [
+        {
+          key: {
+            id: nextMessageId("group-reply"),
+            fromMe: false,
+            remoteJid: "123@g.us",
+            participant: "999@s.whatsapp.net",
+          },
+          message: {
+            extendedTextMessage: {
+              text: "@123 manda 3 ossinhos",
+              contextInfo: {
+                stanzaId: originalId,
+                quotedMessage: {
+                  conversation: "original helpful message",
+                },
+              },
+            },
+          },
+          messageTimestamp: 1_700_000_001,
+        },
+      ],
+    });
+    await waitForMessageCalls(onMessage, 2);
+
+    const inbound = inboundMessage(onMessage, 1);
+    expect(inbound.replyToId).toBe(originalId);
+    expect(inbound.replyToBody).toBe("original helpful message");
+    expect(inbound.replyToSenderE164).toBe("+444");
+    const replyTo = inbound.replyTo as { sender?: { e164?: string; lid?: string } };
+    expect(replyTo.sender?.e164).toBe("+444");
+    expect(replyTo.sender?.lid).toBe("444@lid");
+
+    await listener.close();
+  });
+
   it("does not block follow-up messages when handler is pending", async () => {
     let resolveFirst: (() => void) | null = null;
     const onMessage = vi.fn(async () => {

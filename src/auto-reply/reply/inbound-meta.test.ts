@@ -507,11 +507,17 @@ describe("buildInboundUserContextPrefix", () => {
   it("labels reply context as the current message target", () => {
     const text = buildInboundUserContextPrefix({
       ReplyToSender: "Quoter",
+      ReplyToSenderId: "+15550001111",
+      ReplyToSenderJid: "15550001111@s.whatsapp.net",
+      ReplyToSenderE164: "+15550001111",
       ReplyToBody: "quoted body",
     } as TemplateContext);
 
     const reply = parseReplyPayload(text);
     expect(reply["sender_label"]).toBe("Quoter");
+    expect(reply["sender_id"]).toBe("+15550001111");
+    expect(reply["sender_jid"]).toBe("15550001111@s.whatsapp.net");
+    expect(reply["sender_e164"]).toBe("+15550001111");
     expect(reply["body"]).toBe("quoted body");
   });
 

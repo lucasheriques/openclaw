@@ -342,9 +342,17 @@ function prependPathSegment(value: string | undefined, segment: string): string 
   return parts.includes(segment) ? existing : [segment, ...parts].join(path.delimiter);
 }
 
-function withGringoNgrPathForCodexAppServer(
+function withGringoNgrEnvForCodexAppServer(
   startOptions: CodexAppServerStartOptions,
-  params: { agentId?: string; runId?: string; sessionId?: string; sessionKey?: string },
+  params: {
+    agentId?: string;
+    runId?: string;
+    sessionId?: string;
+    sessionKey?: string;
+    senderE164?: string | null;
+    senderId?: string | null;
+    messageProvider?: string;
+  },
 ): CodexAppServerStartOptions {
   if (params.agentId !== GRINGO_AGENT_ID) {
     return startOptions;
@@ -378,6 +386,16 @@ function withGringoNgrPathForCodexAppServer(
   }
   if (params.sessionKey) {
     env.OPENCLAW_SESSION_KEY = params.sessionKey;
+  }
+  env.OPENCLAW_SHELL = "exec";
+  if (params.senderE164) {
+    env.OPENCLAW_CALLER_PHONE = params.senderE164;
+  }
+  if (params.senderId) {
+    env.OPENCLAW_CALLER_JID = params.senderId;
+  }
+  if (params.messageProvider) {
+    env.OPENCLAW_CALLER_CHANNEL = params.messageProvider;
   }
   return { ...startOptions, env };
 }
@@ -990,11 +1008,14 @@ export async function runCodexAppServerAttempt(
   for (const diagnostic of bundleMcpThreadConfig.diagnostics) {
     embeddedAgentLog.warn(`bundle-mcp: ${diagnostic.pluginId}: ${diagnostic.message}`);
   }
-  const appServerStartOptions = withGringoNgrPathForCodexAppServer(appServer.start, {
+  const appServerStartOptions = withGringoNgrEnvForCodexAppServer(appServer.start, {
     agentId: sessionAgentId,
     runId: params.runId,
     sessionId: params.sessionId,
     sessionKey: sandboxSessionKey,
+    senderE164: params.senderE164,
+    senderId: params.senderId,
+    messageProvider: params.messageChannel ?? params.messageProvider,
   });
   const activeContextEngine = isActiveHarnessContextEngine(params.contextEngine)
     ? params.contextEngine

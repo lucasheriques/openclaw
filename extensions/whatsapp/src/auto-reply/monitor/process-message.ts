@@ -105,7 +105,7 @@ type GringoIdentityPreloadStatus =
 type GringoIdentityPreloadResult = {
   status: GringoIdentityPreloadStatus;
   durationMs: number;
-  bodyForAgentPrefix?: string;
+  trustedContext?: string;
   contextLength?: number;
   accessTier?: string;
   accessModel?: string;
@@ -444,7 +444,7 @@ async function preloadGringoIdentityContext(params: {
     return {
       status: "group_hint",
       durationMs: Date.now() - startedAt,
-      bodyForAgentPrefix: formatGringoGroupIdentityHint({
+      trustedContext: formatGringoGroupIdentityHint({
         phone: params.phone,
         senderJid: params.senderJid,
       }),
@@ -500,7 +500,7 @@ async function preloadGringoIdentityContext(params: {
     return {
       status: "cached",
       durationMs: Date.now() - startedAt,
-      bodyForAgentPrefix: cachedHint,
+      trustedContext: cachedHint,
       contextLength: cachedHint.length,
       openClawSessionKeyForwarded: true,
       quotaAllowed: quotaCheck.quota?.allowed,
@@ -560,7 +560,7 @@ async function preloadGringoIdentityContext(params: {
           resolve({
             status,
             durationMs,
-            bodyForAgentPrefix: promptForAgent,
+            trustedContext: promptForAgent,
             contextLength: promptForAgent.length,
             accessTier: parsedContext?.accessTier,
             accessModel: parsedContext?.accessModel,
@@ -1026,9 +1026,9 @@ export async function processMessage(params: {
     }
     return delivery.providerAccepted;
   }
-  const bodyForAgent = identityPreload.bodyForAgentPrefix
-    ? `${identityPreload.bodyForAgentPrefix}\n\nUser message:\n${msgForAgent.body}`
-    : msgForAgent.body;
+  const trustedContext = identityPreload.trustedContext
+    ? [identityPreload.trustedContext]
+    : undefined;
   const visibleReplyTo = resolveVisibleWhatsAppReplyContext({
     msg: params.msg,
     authDir: account.authDir,
@@ -1093,7 +1093,7 @@ export async function processMessage(params: {
         });
 
   const ctxPayload = buildWhatsAppInboundContext({
-    bodyForAgent,
+    bodyForAgent: msgForAgent.body,
     combinedBody,
     commandBody: params.msg.body,
     commandAuthorized,
@@ -1110,6 +1110,7 @@ export async function processMessage(params: {
       name: sender.name ?? undefined,
       e164: sender.e164 ?? undefined,
     },
+    trustedContext,
     ...(audioTranscript !== undefined ? { transcript: audioTranscript } : {}),
     ...(audioTranscript !== undefined ? { mediaTranscribedIndexes: [0] } : {}),
     replyThreading,

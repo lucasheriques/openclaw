@@ -5,7 +5,7 @@ import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { HEARTBEAT_TRANSCRIPT_PROMPT } from "../heartbeat.js";
 import { buildInboundMediaNote } from "../media-note.js";
 import type { MsgContext, TemplateContext } from "../templating.js";
-import { appendUntrustedContext } from "./untrusted-context.js";
+import { appendTrustedContext, appendUntrustedContext } from "./untrusted-context.js";
 
 const REPLY_MEDIA_HINT =
   "To send an image back, prefer the message tool (media/path/filePath). If you must inline, use MEDIA:https://example.com/image.jpg (spaces ok, quote if needed) or a safe relative path like MEDIA:./image.jpg. Absolute and ~ paths only work when they stay inside your allowed file-read boundary; host file:// URLs are blocked. Keep caption in the text body.";
@@ -34,7 +34,7 @@ export function buildReplyPromptBodies(params: {
   const rawPrefixedBody = params.prefixedBody ?? params.effectiveBaseBody;
   const bodyWithEvents = prependEvents(params.effectiveBaseBody);
   const prefixedBodyWithEvents = appendUntrustedContext(
-    prependEvents(rawPrefixedBody),
+    appendTrustedContext(prependEvents(rawPrefixedBody), params.sessionCtx.TrustedContext),
     params.sessionCtx.UntrustedContext,
   );
   const prefixedBody = [params.threadContextNote, prefixedBodyWithEvents]

@@ -13,8 +13,12 @@ import { getChildLogger } from "openclaw/plugin-sdk/logging-core";
 import { defaultRuntime } from "openclaw/plugin-sdk/runtime-env";
 import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import { readWebSelfIdentityForDecision, WhatsAppAuthUnstableError } from "../auth-store.js";
-import { getPrimaryIdentityId, resolveComparableIdentity } from "../identity.js";
-import { cacheInboundMessageMeta } from "../quoted-message.js";
+import {
+  getPrimaryIdentityId,
+  resolveComparableIdentity,
+  type WhatsAppReplyContext,
+} from "../identity.js";
+import { cacheInboundMessageMeta, lookupInboundMessageMeta } from "../quoted-message.js";
 import { DEFAULT_RECONNECT_POLICY, computeBackoff, sleepWithAbort } from "../reconnect.js";
 import type { OpenClawConfig } from "../runtime-api.js";
 import { createWaSocket, formatError, getStatusCode, waitForWaConnection } from "../session.js";
@@ -31,6 +35,7 @@ import {
 } from "./dedupe.js";
 import {
   describeReplyContext,
+  extractContextInfo,
   extractLocationData,
   extractContactContext,
   extractMediaPlaceholder,
@@ -709,6 +714,41 @@ export async function attachWebInboxToSocket(
     };
   };
 
+  const resolveReplyContextFromCache = (
+    msg: WAMessage,
+    inbound: NormalizedInboundMessage,
+    replyContext: WhatsAppReplyContext | null | undefined,
+  ): WhatsAppReplyContext | null | undefined => {
+    const contextInfo = extractContextInfo(msg.message as proto.IMessage | undefined);
+    const replyToId = replyContext?.id ?? contextInfo?.stanzaId ?? undefined;
+    if (!replyToId) {
+      return replyContext;
+    }
+    const cached = lookupInboundMessageMeta(
+      inbound.access.resolvedAccountId,
+      inbound.remoteJid,
+      replyToId,
+    );
+    if (!cached) {
+      return replyContext;
+    }
+    const currentSender = resolveComparableIdentity(replyContext?.sender, options.authDir);
+    const cachedSender = resolveComparableIdentity(
+      {
+        jid: cached.participant,
+        e164: cached.participantE164 ?? null,
+        label: cached.participantE164 ?? cached.participant ?? null,
+      },
+      options.authDir,
+    );
+    return {
+      id: replyToId,
+      body: replyContext?.body || cached.body || "",
+      sender:
+        currentSender.e164 || currentSender.jid || currentSender.lid ? currentSender : cachedSender,
+    };
+  };
+
   const enqueueInboundMessage = async (
     msg: WAMessage,
     inbound: NormalizedInboundMessage,
@@ -749,6 +789,7 @@ export async function attachWebInboxToSocket(
     const timestamp = inbound.messageTimestampMs;
     const mentionedJids = extractMentionedJids(msg.message as proto.IMessage | undefined);
     const senderName = msg.pushName ?? undefined;
+    const replyContext = resolveReplyContextFromCache(msg, inbound, enriched.replyContext);
 
     inboundLogger.info(
       {
@@ -782,12 +823,12 @@ export async function attachWebInboxToSocket(
       senderJid: inbound.participantJid,
       senderE164: inbound.senderE164 ?? undefined,
       senderName,
-      replyTo: enriched.replyContext ?? undefined,
-      replyToId: enriched.replyContext?.id,
-      replyToBody: enriched.replyContext?.body,
-      replyToSender: enriched.replyContext?.sender?.label ?? undefined,
-      replyToSenderJid: enriched.replyContext?.sender?.jid ?? undefined,
-      replyToSenderE164: enriched.replyContext?.sender?.e164 ?? undefined,
+      replyTo: replyContext ?? undefined,
+      replyToId: replyContext?.id,
+      replyToBody: replyContext?.body,
+      replyToSender: replyContext?.sender?.label ?? undefined,
+      replyToSenderJid: replyContext?.sender?.jid ?? undefined,
+      replyToSenderE164: replyContext?.sender?.e164 ?? undefined,
       groupSubject: inbound.groupSubject,
       groupParticipants: inbound.groupParticipants,
       mentions: mentionedJids ?? undefined,
@@ -836,8 +877,7 @@ export async function attachWebInboxToSocket(
     if (inboundMessage.id) {
       cacheInboundMessageMeta(inboundMessage.accountId, inboundMessage.chatId, inboundMessage.id, {
         participant: inboundMessage.senderJid,
-        participantE164:
-          inboundMessage.chatType === "direct" ? inboundMessage.senderE164 : undefined,
+        participantE164: inboundMessage.senderE164,
         body: inboundMessage.body,
         fromMe: inboundMessage.fromMe,
       });

@@ -50,6 +50,12 @@ export function finalizeInboundContext<T extends Record<string, unknown>>(
   normalized.Transcript = normalizeTextField(normalized.Transcript);
   normalized.ThreadStarterBody = normalizeTextField(normalized.ThreadStarterBody);
   normalized.ThreadHistoryBody = normalizeTextField(normalized.ThreadHistoryBody);
+  if (Array.isArray(normalized.TrustedContext)) {
+    const normalizedTrusted = normalized.TrustedContext.map((entry) =>
+      sanitizeInboundSystemTags(normalizeInboundTextNewlines(entry)),
+    ).filter((entry) => Boolean(entry));
+    normalized.TrustedContext = normalizedTrusted;
+  }
   if (Array.isArray(normalized.UntrustedContext)) {
     const normalizedUntrusted = normalized.UntrustedContext.map((entry) =>
       sanitizeInboundSystemTags(normalizeInboundTextNewlines(entry)),

@@ -66,6 +66,9 @@ type VisibleReplyTarget = {
   body?: string;
   sender?: {
     label?: string | null;
+    jid?: string | null;
+    lid?: string | null;
+    e164?: string | null;
   } | null;
 };
 
@@ -131,6 +134,14 @@ function normalizeInboundTimestampMs(timestamp: number | undefined): number | nu
 
 function computeLatencyMs(startedAt: number | null, completedAt: number) {
   return startedAt === null ? null : Math.max(0, completedAt - startedAt);
+}
+
+function e164Last4(value: string | null | undefined): string | null {
+  const digits = (value ?? "").replace(/\D/g, "");
+  if (!digits) {
+    return null;
+  }
+  return digits.slice(-4);
 }
 
 function resolveWhatsAppDeliverablePayload(
@@ -261,6 +272,7 @@ export function buildWhatsAppInboundContext(params: {
   rawBody?: string;
   route: ReturnType<typeof resolveAgentRoute>;
   sender: SenderContext;
+  trustedContext?: string[];
   transcript?: string;
   mediaTranscribedIndexes?: number[];
   replyThreading?: ReplyThreadingContext;
@@ -294,6 +306,13 @@ export function buildWhatsAppInboundContext(params: {
     ReplyToId: params.visibleReplyTo?.id,
     ReplyToBody: params.visibleReplyTo?.body,
     ReplyToSender: params.visibleReplyTo?.sender?.label,
+    ReplyToSenderId:
+      params.visibleReplyTo?.sender?.e164 ??
+      params.visibleReplyTo?.sender?.jid ??
+      params.visibleReplyTo?.sender?.lid ??
+      undefined,
+    ReplyToSenderJid: params.visibleReplyTo?.sender?.jid ?? undefined,
+    ReplyToSenderE164: params.visibleReplyTo?.sender?.e164 ?? undefined,
     MediaPath: params.msg.mediaPath,
     MediaUrl: params.msg.mediaUrl,
     MediaType: params.msg.mediaType,
@@ -320,6 +339,7 @@ export function buildWhatsAppInboundContext(params: {
     ReplyThreading: params.replyThreading,
     WasMentioned: params.msg.wasMentioned,
     GroupSystemPrompt: params.groupSystemPrompt,
+    TrustedContext: params.trustedContext,
     UntrustedStructuredContext: params.msg.untrustedStructuredContext,
     ...(params.msg.location ? toLocationContext(params.msg.location) : {}),
     Provider: "whatsapp",
@@ -758,6 +778,9 @@ export async function dispatchWhatsAppBufferedReply(params: {
       chatType: params.msg.chatType,
       from: params.msg.chatType === "group" ? params.conversationId : params.msg.from,
       to: params.msg.to,
+      senderE164Last4: e164Last4(params.msg.senderE164 ?? null),
+      replyToSenderE164Last4: e164Last4(params.msg.replyToSenderE164 ?? null),
+      hasReplyToSenderE164: Boolean(params.msg.replyToSenderE164),
       modelProvider: deliveryTelemetry.modelProvider,
       model: deliveryTelemetry.model,
       thinkLevel: deliveryTelemetry.thinkLevel,

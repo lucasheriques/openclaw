@@ -338,6 +338,15 @@ describe("whatsapp inbound dispatch", () => {
         name: "Alice",
         e164: "+15550002222",
       },
+      visibleReplyTo: {
+        id: "wamid.helpful",
+        body: "Useful answer",
+        sender: {
+          label: "Bob",
+          jid: "15550003333@s.whatsapp.net",
+          e164: "+15550003333",
+        },
+      },
     });
 
     expectRecordFields(requireRecord(ctx, "inbound context"), {
@@ -351,6 +360,11 @@ describe("whatsapp inbound dispatch", () => {
       SenderE164: "+15550002222",
       OriginatingChannel: "whatsapp",
       OriginatingTo: "123@g.us",
+      ReplyToId: "wamid.helpful",
+      ReplyToSender: "Bob",
+      ReplyToSenderId: "+15550003333",
+      ReplyToSenderJid: "15550003333@s.whatsapp.net",
+      ReplyToSenderE164: "+15550003333",
     });
   });
 
@@ -977,7 +991,11 @@ describe("whatsapp inbound dispatch", () => {
     await expect(
       dispatchBufferedReply({
         deliverReply,
-        msg: makeMsg({ timestamp: Date.now() - 5000 }),
+        msg: makeMsg({
+          timestamp: Date.now() - 5000,
+          senderE164: "+15550001111",
+          replyToSenderE164: "+15550002222",
+        }),
         replyLogger,
       }),
     ).resolves.toBe(true);
@@ -990,6 +1008,9 @@ describe("whatsapp inbound dispatch", () => {
         sessionKey: "agent:main:whatsapp:direct:+1000",
         routeMatchedBy: "default",
         chatType: "direct",
+        senderE164Last4: "1111",
+        replyToSenderE164Last4: "2222",
+        hasReplyToSenderE164: true,
         inboundBody: "hi",
         inboundBodyLength: 2,
         combinedBodyLength: 2,
@@ -1265,5 +1286,22 @@ describe("whatsapp inbound dispatch", () => {
         normalizeE164: () => null,
       }),
     ).toBe("+15550003333");
+  });
+
+  it("passes trusted context into the inbound context without changing BodyForAgent", () => {
+    const ctx = buildWhatsAppInboundContext({
+      bodyForAgent: "real message",
+      combinedBody: "real message",
+      conversationId: "+1000",
+      msg: makeMsg({ body: "real message" }),
+      route: makeRoute(),
+      sender: {
+        e164: "+1000",
+      },
+      trustedContext: ["Trusted Gringo card"],
+    });
+
+    expect(ctx.BodyForAgent).toBe("real message");
+    expect(ctx.TrustedContext).toEqual(["Trusted Gringo card"]);
   });
 });

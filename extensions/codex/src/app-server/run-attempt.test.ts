@@ -6426,7 +6426,7 @@ describe("runCodexAppServerAttempt", () => {
     expect(requests.map((entry) => entry.method)).toContain("turn/start");
   });
 
-  it("prepares ngr PATH and cache env for Gringo Codex app-server sessions", async () => {
+  it("prepares ngr PATH, cache, and trusted caller env for Gringo Codex app-server sessions", async () => {
     const previousPath = process.env.PATH;
     const previousGringoNgrBin = process.env.GRINGO_NGR_BIN;
     const previousNgrCacheDir = process.env.NGR_CACHE_DIR;
@@ -6452,6 +6452,9 @@ describe("runCodexAppServerAttempt", () => {
       params.runId = "run-1";
       params.sessionId = "session-1";
       params.sessionKey = "agent:gringo:whatsapp:direct:+15550002222";
+      params.messageProvider = "whatsapp";
+      params.senderE164 = "+15550002222";
+      params.senderId = "15550002222@s.whatsapp.net";
 
       const run = runCodexAppServerAttempt(params);
       await waitForMethod("turn/start");
@@ -6470,6 +6473,10 @@ describe("runCodexAppServerAttempt", () => {
       expect(seenStartOptions[0]?.env?.OPENCLAW_SESSION_KEY).toBe(
         "agent:gringo:whatsapp:direct:+15550002222",
       );
+      expect(seenStartOptions[0]?.env?.OPENCLAW_SHELL).toBe("exec");
+      expect(seenStartOptions[0]?.env?.OPENCLAW_CALLER_CHANNEL).toBe("whatsapp");
+      expect(seenStartOptions[0]?.env?.OPENCLAW_CALLER_PHONE).toBe("+15550002222");
+      expect(seenStartOptions[0]?.env?.OPENCLAW_CALLER_JID).toBe("15550002222@s.whatsapp.net");
     } finally {
       if (previousPath === undefined) {
         delete process.env.PATH;

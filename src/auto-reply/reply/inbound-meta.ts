@@ -561,6 +561,9 @@ export function buildInboundUserContextPrefix(
     blocks.push(
       formatUntrustedJsonBlock("Reply target of current user message (untrusted, for context):", {
         sender_label: normalizePromptMetadataString(ctx.ReplyToSender),
+        sender_id: normalizePromptMetadataString(ctx.ReplyToSenderId),
+        sender_jid: normalizePromptMetadataString(ctx.ReplyToSenderJid),
+        sender_e164: normalizePromptMetadataString(ctx.ReplyToSenderE164),
         is_quote: ctx.ReplyToIsQuote === true ? true : undefined,
         body: replyToBody,
       }),
