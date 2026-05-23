@@ -13,6 +13,7 @@ const hoisted = vi.hoisted(() => ({
   loadOutboundMediaFromUrl: vi.fn(),
   controllerListeners: new Map<string, ActiveWebListener>(),
   runFfmpeg: vi.fn(),
+  execFile: vi.fn(),
 }));
 const loadWebMediaMock = vi.fn();
 let sendMessageWhatsApp: typeof import("./send.js").sendMessageWhatsApp;
@@ -71,6 +72,14 @@ vi.mock("openclaw/plugin-sdk/media-runtime", async () => {
   };
 });
 
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    execFile: hoisted.execFile,
+  };
+});
+
 vi.mock("./text-runtime.js", async () => {
   const actual = await vi.importActual<typeof import("./text-runtime.js")>("./text-runtime.js");
   return {
@@ -96,6 +105,19 @@ describe("web outbound", () => {
       fsSync.writeFileSync(args.at(-1) ?? "", Buffer.from("opus-output"));
       return "";
     });
+    hoisted.execFile
+      .mockReset()
+      .mockImplementation(
+        (
+          _file: string,
+          _args: readonly string[],
+          _options: Record<string, unknown>,
+          callback: (error: Error | null, stdout: string, stderr: string) => void,
+        ) => {
+          callback(null, "", "");
+          return {} as never;
+        },
+      );
     hoisted.loadOutboundMediaFromUrl.mockReset().mockImplementation(
       async (
         mediaUrl: string,
@@ -240,6 +262,32 @@ describe("web outbound", () => {
 
     expect(sendComposingTo).not.toHaveBeenCalled();
     expect(sendMessage).toHaveBeenCalledWith("+1555", "", Buffer.from("img"), "image/jpeg");
+  });
+
+  it("marks local webp media as a sent sticker after accepted delivery", async () => {
+    const buf = Buffer.from("webp");
+    loadWebMediaMock.mockResolvedValueOnce({
+      buffer: buf,
+      contentType: "image/webp",
+      kind: "image",
+    });
+
+    await sendMessageWhatsApp("+1555", "", {
+      verbose: false,
+      cfg: WHATSAPP_TEST_CFG,
+      mediaUrl: "/tmp/sticker.webp",
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith("+1555", "", buf, "image/webp");
+    expect(hoisted.execFile).toHaveBeenCalledWith(
+      "ngr",
+      ["stickers", "mark-sent", "--path", "/tmp/sticker.webp", "--format", "json"],
+      expect.objectContaining({
+        encoding: "utf8",
+        timeout: 2000,
+      }),
+      expect.any(Function),
+    );
   });
 
   it("skips whitespace-only text sends without media", async () => {

@@ -1,3 +1,6 @@
+import { execFile, type ExecFileException, type ExecFileOptions } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { formatCliCommand } from "openclaw/plugin-sdk/cli-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { generateSecureUuid } from "openclaw/plugin-sdk/core";
@@ -27,6 +30,7 @@ import { loadOutboundMediaFromUrl } from "./outbound-media.runtime.js";
 import { markdownToWhatsApp, toWhatsappJid } from "./text-runtime.js";
 
 const outboundLog = createSubsystemLogger("gateway/channels/whatsapp").child("outbound");
+const STICKER_MARK_SENT_TIMEOUT_MS = 2000;
 
 function supportsForcedDocumentDelivery(kind: "image" | "audio" | "video" | "document"): boolean {
   return kind === "image" || kind === "video";
@@ -57,6 +61,84 @@ function requireOutboundActiveWebListener(params: { cfg: OpenClawConfig; account
     );
   }
   return { accountId: resolvedAccountId, listener };
+}
+
+function resolveGringoNgrBin(): string {
+  return process.env.GRINGO_NGR_BIN?.trim() || process.env.NGR_BIN?.trim() || "ngr";
+}
+
+function resolveGringoWorkspaceCwd(): string | undefined {
+  return (
+    process.env.GRINGO_WORKSPACE_DIR?.trim() || process.env.OPENCLAW_GRINGO_WORKSPACE_DIR?.trim()
+  );
+}
+
+function resolveLocalMediaPath(mediaUrl: string | undefined): string | undefined {
+  const trimmed = mediaUrl?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "file:" ? fileURLToPath(parsed) : undefined;
+  } catch {
+    const withoutQueryOrFragment = trimmed.split(/[?#]/, 1)[0] ?? "";
+    return path.isAbsolute(withoutQueryOrFragment) ? withoutQueryOrFragment : undefined;
+  }
+}
+
+function formatStickerMarkSentError(error: ExecFileException | null, stderr: string): string {
+  if (error) {
+    return error.killed || error.signal
+      ? `process ${error.signal ?? "killed"}`
+      : error.message || "process failed";
+  }
+  return stderr.trim() || "no output";
+}
+
+function markStickerSentAfterDelivery(params: {
+  mediaUrl?: string;
+  mediaType?: string;
+  providerAccepted: boolean;
+}) {
+  if (!params.providerAccepted || params.mediaType !== "image/webp") {
+    return;
+  }
+  const stickerPath = resolveLocalMediaPath(params.mediaUrl);
+  if (!stickerPath) {
+    return;
+  }
+
+  const execOptions: ExecFileOptions = {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      OPENCLAW_SHELL: process.env.OPENCLAW_SHELL?.trim() || "exec",
+    },
+    maxBuffer: 32 * 1024,
+    timeout: STICKER_MARK_SENT_TIMEOUT_MS,
+  };
+  const cwd = resolveGringoWorkspaceCwd();
+  if (cwd) {
+    execOptions.cwd = cwd;
+  }
+
+  execFile(
+    resolveGringoNgrBin(),
+    ["stickers", "mark-sent", "--path", stickerPath, "--format", "json"],
+    execOptions,
+    (error: ExecFileException | null, _stdoutRaw: string | Buffer, stderrRaw: string | Buffer) => {
+      if (!error) {
+        return;
+      }
+      outboundLog.warn(
+        `sticker mark-sent failed file=${path.basename(stickerPath)} error=${formatStickerMarkSentError(
+          error,
+          stderrRaw.toString(),
+        )}`,
+      );
+    },
+  );
 }
 
 export async function sendMessageWhatsApp(
@@ -182,6 +264,11 @@ export async function sendMessageWhatsApp(
     const result = sendOptions
       ? await active.sendMessage(to, text, mediaBuffer, mediaType, sendOptions)
       : await active.sendMessage(to, text, mediaBuffer, mediaType);
+    markStickerSentAfterDelivery({
+      mediaUrl: primaryMediaUrl,
+      mediaType,
+      providerAccepted: Boolean((result as { providerAccepted?: boolean })?.providerAccepted),
+    });
     if (visibleTextAfterVoice) {
       if (sendOptions) {
         await active.sendMessage(to, visibleTextAfterVoice, undefined, undefined, sendOptions);
