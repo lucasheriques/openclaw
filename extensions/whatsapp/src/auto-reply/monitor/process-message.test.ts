@@ -769,6 +769,100 @@ describe("processMessage group system prompt wiring", () => {
     );
   });
 
+  it("sends the Gringo account-required message without running the agent for unknown WhatsApp phones", async () => {
+    const replyInfo = vi.fn();
+    resolvePolicyMock.mockReturnValue(makePolicy(makeAccount()));
+    execFileMock.mockImplementation(
+      (
+        _bin: string,
+        _args: string[],
+        _options: unknown,
+        callback: (error: null, stdout: string, stderr: string) => void,
+      ) => {
+        callback(
+          null,
+          JSON.stringify({
+            ok: true,
+            data: {
+              identity: {
+                resolved: true,
+                phone: "+15550007777",
+                source: "transport_phone",
+              },
+              prompt:
+                "Trusted NaGringa coaching context\n\n# Unknown user - +15550007777\n\n- **Missing fields:** appAccount\n\n## Account Required",
+              workingContext:
+                "Trusted NaGringa working context\n- User: Unknown user\n- Missing fields: appAccount\n- Account: not linked to a NaGringa app account",
+              missingFields: ["appAccount"],
+              access: {
+                label: "free tier · DM: gated",
+                hasAccess: false,
+                dmEnabled: false,
+                isAdmin: false,
+              },
+              quota: {
+                allowed: true,
+                limit: 10,
+                used: 1,
+                remaining: 9,
+                monthKey: "2026-05",
+                accessTier: "free",
+              },
+            },
+          }),
+          "",
+        );
+      },
+    );
+
+    const sent = await callProcessMessage({
+      msg: {
+        ...baseMsg,
+        from: "+15550007777",
+        conversationId: "+15550007777",
+        chatId: "+15550007777",
+        chatType: "direct",
+        senderE164: "+15550007777",
+        senderJid: "15550007777@s.whatsapp.net",
+      },
+      route: {
+        ...baseRoute,
+        agentId: "gringo",
+        sessionKey: "agent:gringo:whatsapp:direct:+15550007777",
+        mainSessionKey: "agent:gringo:whatsapp:direct:+15550007777",
+      },
+      replyLogger: {
+        info: replyInfo,
+        warn: () => {},
+        error: () => {},
+        debug: () => {},
+      },
+    });
+
+    expect(sent).toBe(true);
+    expect(buildContextMock).not.toHaveBeenCalled();
+    expect(deliverWebReplyMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyResult: {
+          text: expect.stringContaining("conta NaGringa ligada a este WhatsApp"),
+        },
+      }),
+    );
+    expect(replyInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        identityPreloadStatus: "unknown",
+        gringoQuotaAllowed: true,
+      }),
+      "gringo identity preload completed",
+    );
+    expect(replyInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerAccepted: true,
+      }),
+      "gringo unknown account message sent",
+    );
+  });
+
   it("injects full Gringo identity context once per direct session", async () => {
     resolvePolicyMock.mockReturnValue(makePolicy(makeAccount()));
     execFileMock.mockImplementation(

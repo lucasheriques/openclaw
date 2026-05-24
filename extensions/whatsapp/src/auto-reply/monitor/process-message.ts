@@ -133,6 +133,8 @@ type GringoIdentityPreloadResult = {
   error?: string;
 };
 
+const GRINGO_ACCOUNT_REQUIRED_URL = "https://nagringa.dev/app";
+
 function resolveGringoIdentityPreloadTimeoutMs(): number {
   const raw = process.env.OPENCLAW_GRINGO_IDENTITY_PRELOAD_TIMEOUT_MS?.trim();
   if (!raw) {
@@ -155,7 +157,7 @@ function resolveGringoWorkspaceCwd(): string | undefined {
 }
 
 function isUnknownGringoUserContext(stdout: string): boolean {
-  return /unknown user|not map to a known user/i.test(stdout);
+  return /unknown user|not map to a known user|account required|appAccount/i.test(stdout);
 }
 
 function isProcessTimeoutError(error: unknown): boolean {
@@ -244,6 +246,16 @@ function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
+function hasMissingAppAccount(fields: string[]): boolean {
+  return fields.some((field) => field.trim().toLowerCase() === "appaccount");
+}
+
 function resolveGringoAccessTier(access: Record<string, unknown> | undefined): string | undefined {
   if (!access) return undefined;
   if (readBoolean(access.isAdmin) === true) return "admin";
@@ -288,6 +300,7 @@ function parseGringoCoachContextOutput(output: string): {
   quotaAccessTier?: string;
   quotaBlockedReason?: string;
   quotaUsageId?: string;
+  accountRequired?: boolean;
 } | null {
   try {
     const envelope = JSON.parse(output) as unknown;
@@ -303,6 +316,7 @@ function parseGringoCoachContextOutput(output: string): {
     const quota = readObject(data.quota);
     const coachingState = readObject(data.coachingState);
     const userProfile = readObject(data.userProfile);
+    const missingFields = readStringArray(data.missingFields);
     return {
       prompt,
       workingContext: readString(data.workingContext),
@@ -326,6 +340,8 @@ function parseGringoCoachContextOutput(output: string): {
       quotaAccessTier: readString(quota?.accessTier),
       quotaBlockedReason: readString(quota?.blockedReason),
       quotaUsageId: readString(quota?.usageId),
+      accountRequired:
+        hasMissingAppAccount(missingFields) || /account required|appAccount/i.test(prompt),
     };
   } catch {
     return null;
@@ -418,6 +434,13 @@ function formatGringoQuotaUpsellMessage(params: { limit?: number; monthKey?: str
   return [
     `Você chegou ao limite gratuito de ${limit} mensagens do Gringo este mês.`,
     "Para continuar conversando agora, assine a Na Gringa: https://nagringa.dev/assine",
+  ].join("\n\n");
+}
+
+function formatGringoAccountRequiredMessage(): string {
+  return [
+    "Oi! Não encontrei uma conta NaGringa ligada a este WhatsApp ainda.",
+    `Crie ou entre na sua conta e cadastre este número em ${GRINGO_ACCOUNT_REQUIRED_URL}. Depois disso, me chama aqui de novo.`,
   ].join("\n\n");
 }
 
@@ -547,11 +570,14 @@ async function preloadGringoIdentityContext(params: {
         const durationMs = Date.now() - startedAt;
         const output = stdoutRaw.toString().trim();
         if (output) {
-          const status = isUnknownGringoUserContext(output) ? "unknown" : "success";
           const parsedContext = parseGringoCoachContextOutput(output);
+          const status =
+            parsedContext?.accountRequired === true || isUnknownGringoUserContext(output)
+              ? "unknown"
+              : "success";
           const prompt = parsedContext?.prompt ?? output;
           const promptForAgent = `${formatGringoPreloadedIdentityHint()}\n\n${prompt}`;
-          if (sessionCacheKey) {
+          if (sessionCacheKey && status !== "unknown") {
             setCachedGringoIdentityWorkingContext(
               sessionCacheKey,
               parsedContext?.workingContext ?? formatGringoCachedIdentityHint(),
@@ -962,6 +988,60 @@ export async function processMessage(params: {
       },
       "gringo identity preload completed",
     );
+  }
+  if (
+    params.route.agentId === GRINGO_AGENT_ID &&
+    params.msg.chatType === "direct" &&
+    identityPreload.status === "unknown"
+  ) {
+    const accountRequiredMessage = formatGringoAccountRequiredMessage();
+    const delivery = await deliverWebReply({
+      replyResult: { text: accountRequiredMessage },
+      msg: params.msg,
+      maxMediaBytes: params.maxMediaBytes,
+      textLimit: 4096,
+      replyLogger: params.replyLogger,
+      connectionId: params.connectionId,
+      skipLog: false,
+    });
+    if (delivery.providerAccepted) {
+      params.rememberSentText(accountRequiredMessage, {
+        combinedBody,
+        combinedBodySessionKey: params.route.sessionKey,
+        logVerboseMessage: true,
+      });
+    }
+    params.replyLogger.info(
+      {
+        accountId: params.route.accountId ?? params.msg.accountId,
+        agentId: params.route.agentId,
+        correlationId,
+        chatType: params.msg.chatType,
+        providerAccepted: delivery.providerAccepted,
+      },
+      "gringo unknown account message sent",
+    );
+    removeAckReactionHandleAfterReply({
+      removeAfterReply: Boolean(
+        params.cfg.messages?.removeAckAfterReply && delivery.providerAccepted,
+      ),
+      ackReaction,
+      onError: (err) => {
+        logAckFailure({
+          log: logVerbose,
+          channel: "whatsapp",
+          target: `${params.msg.chatId ?? conversationId}/${params.msg.id ?? "unknown"}`,
+          error: err,
+        });
+      },
+    });
+    if (statusReactionController) {
+      void statusReactionController.setDone();
+    }
+    if (shouldClearGroupHistory) {
+      params.groupHistories.set(params.groupHistoryKey, []);
+    }
+    return delivery.providerAccepted;
   }
   if (
     params.route.agentId === GRINGO_AGENT_ID &&
