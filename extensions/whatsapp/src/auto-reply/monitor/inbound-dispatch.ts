@@ -525,18 +525,15 @@ export async function dispatchWhatsAppBufferedReply(params: {
     typeof params.context.CommandAuthorized === "boolean"
       ? params.context.CommandAuthorized
       : undefined;
-  const sourceReplyDeliveryMode =
-    sourceReplyChatType === "group" || sourceReplyChatType === "channel"
-      ? resolveChannelMessageSourceReplyDeliveryMode({
-          cfg: params.cfg,
-          ctx: {
-            ChatType: sourceReplyChatType,
-            CommandTurn: sourceReplyCommandTurn,
-            CommandSource: sourceReplyCommandSource,
-            CommandAuthorized: sourceReplyCommandAuthorized,
-          },
-        })
-      : undefined;
+  const sourceReplyDeliveryMode = resolveChannelMessageSourceReplyDeliveryMode({
+    cfg: params.cfg,
+    ctx: {
+      ChatType: sourceReplyChatType,
+      CommandTurn: sourceReplyCommandTurn,
+      CommandSource: sourceReplyCommandSource,
+      CommandAuthorized: sourceReplyCommandAuthorized,
+    },
+  });
   const sourceRepliesAreToolOnly = sourceReplyDeliveryMode === "message_tool_only";
   const disableBlockStreaming = sourceRepliesAreToolOnly
     ? true

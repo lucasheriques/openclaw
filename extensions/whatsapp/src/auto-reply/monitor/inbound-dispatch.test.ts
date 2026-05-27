@@ -867,14 +867,30 @@ describe("whatsapp inbound dispatch", () => {
     expect(getCapturedReplyOptions()?.disableBlockStreaming).toBeUndefined();
   });
 
-  it("leaves WhatsApp direct reply mode unset by default", async () => {
+  it("defaults WhatsApp direct replies to automatic delivery", async () => {
     await dispatchBufferedReply({
       context: { Body: "hi", ChatType: "direct" },
       msg: makeMsg({ from: "+15550001000", chatType: "direct" }),
     });
 
     expect(getCapturedReplyOptions()?.disableBlockStreaming).toBe(false);
-    expect(getCapturedReplyOptions()?.sourceReplyDeliveryMode).toBeUndefined();
+    expect(getCapturedReplyOptions()?.sourceReplyDeliveryMode).toBe("automatic");
+  });
+
+  it("honors global message-tool-only delivery for WhatsApp direct replies", async () => {
+    await dispatchBufferedReply({
+      cfg: {
+        channels: { whatsapp: { blockStreaming: true } },
+        messages: { visibleReplies: "message_tool" },
+      } as never,
+      context: { Body: "hi", ChatType: "direct" },
+      msg: makeMsg({ from: "+15550001000", chatType: "direct" }),
+    });
+
+    expectRecordFields(requireRecord(getCapturedReplyOptions(), "reply options"), {
+      sourceReplyDeliveryMode: "message_tool_only",
+      disableBlockStreaming: true,
+    });
   });
 
   it("defaults WhatsApp group replies to message-tool-only and disables source streaming", async () => {
