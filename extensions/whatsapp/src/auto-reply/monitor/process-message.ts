@@ -133,7 +133,7 @@ type GringoIdentityPreloadResult = {
   error?: string;
 };
 
-const GRINGO_ACCOUNT_REQUIRED_URL = "https://nagringa.dev/app";
+const GRINGO_ACCOUNT_REQUIRED_URL = "https://nagringa.dev/app/configuracoes?addPhone=true";
 
 function resolveGringoIdentityPreloadTimeoutMs(): number {
   const raw = process.env.OPENCLAW_GRINGO_IDENTITY_PRELOAD_TIMEOUT_MS?.trim();
